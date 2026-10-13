@@ -22,7 +22,6 @@ const sourceLabel = computed(
     ({
       builtin: '内置规则',
       manual: '人工覆盖',
-      llm: 'LLM 识别',
       none: '未识别',
     })[props.usage.source] || '未识别',
 )

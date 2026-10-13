@@ -33,6 +33,10 @@ namespace perfstat::analyze {
 class RuleDb;
 }
 
+namespace perfstat::store {
+class Database;
+}
+
 namespace perfstat::api {
 
 struct ServerOptions {
@@ -44,8 +48,16 @@ struct ServerOptions {
 
 class HttpServer {
 public:
+    /*
+     * ====================================================================
+     * 构造
+     * ====================================================================
+     * 参数：
+     *   rules      用途规则库（M5）
+     *   history_db 历史查询连接（M7 的历史页读它）；--no-persist 时传 nullptr
+     */
     HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-               SseHub* hub, analyze::RuleDb* rules);
+               SseHub* hub, analyze::RuleDb* rules, store::Database* history_db);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -74,6 +86,7 @@ private:
     ServiceStore*                    service_store_{nullptr};
     SseHub*                          hub_{nullptr};
     analyze::RuleDb*                 rules_{nullptr};
+    store::Database*                 history_db_{nullptr};
     std::unique_ptr<httplib::Server> server_;
     std::thread                      thread_;
     int                              bound_port_{0};

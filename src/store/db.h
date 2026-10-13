@@ -53,7 +53,7 @@ public:
      * ====================================================================
      * 目标：dim_usage 单行 upsert
      * 保护：目标行已是 source='manual' 时，仅允许同为 manual 的写入覆盖它
-     *       —— D13 要求 llm 自动回写不得污染人工覆盖
+     *       —— D13 要求人工覆盖不被其它来源冲刷
      */
     bool upsert_usage(const UsageRow& usage, std::string* err);
 
@@ -64,6 +64,25 @@ public:
      * 目标：联 dim_entity 读出全部用途行，供规则库载入内存
      */
     bool load_usages(std::vector<UsageRow>* out, std::string* err);
+
+    /*
+     * ====================================================================
+     * 步骤：区间统计查询（M7 历史页）
+     * ====================================================================
+     * 目标：从 fact_metric_1m 按 [from_ts, to_ts) 聚合，走 idx_fact_ts
+     */
+    // 按实体汇总，按 cpu_avg 降序取前 limit 个
+    bool query_entity_stats(std::int64_t from_ts, std::int64_t to_ts, int limit,
+                            std::vector<EntityStatRow>* out, std::string* err);
+
+    // 全系统时间序列：同一桶内各实体相加（整机口径）
+    bool query_system_series(std::int64_t from_ts, std::int64_t to_ts, std::int64_t bucket_seconds,
+                             std::vector<SeriesPoint>* out, std::string* err);
+
+    // 单实体时间序列
+    bool query_entity_series(std::int64_t entity_id, std::int64_t from_ts, std::int64_t to_ts,
+                             std::int64_t bucket_seconds, std::vector<SeriesPoint>* out,
+                             std::string* err);
 
     // 概况统计，用于验收与前端展示
     struct Stats {

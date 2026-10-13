@@ -5,10 +5,10 @@
  * 作用：本地用途规则库 —— 三级瀑布的第 1 级（builtin 命中 + 人工覆盖）
  * 依据：
  *   docs/DESIGN.md 6.5（用途识别与清理建议）
- *   D13（builtin / llm / manual 三者共存不互相污染）
+ *   D13（builtin / manual 共存，manual 优先级最高）
  * 说明：
  *   - 识别对象键取「聚合实体」口径（见 usage_types.h 的 usage_key）
- *   - builtin 规则编译在 exe 内；manual / llm 覆盖落 dim_usage 并在启动时载入内存
+ *   - builtin 规则编译在 exe 内；manual 覆盖落 dim_usage 并在启动时载入内存
  *   - resolve 会被采集线程（序列化）与 HTTP 线程同时调用，故内部持锁；
  *     写路径把 DB IO 放在锁外，避免阻塞每轮序列化
  *   - attach 只在启动阶段调用一次，之后 db_ 不再变化
@@ -51,7 +51,7 @@ public:
      * ====================================================================
      * 步骤：三级解析
      * ====================================================================
-     * 优先级：manual > llm > builtin > 未知（category=其他 / purpose=未知）
+     * 优先级：manual > builtin > 未知（category=其他 / purpose=未知）
      * 线程安全：可在任意线程调用
      */
     UsageEntry resolve(const std::string& kind, const std::string& name,
@@ -64,20 +64,20 @@ public:
      * 操作：
      *   1) 若已挂库：upsert 聚合实体 -> dim_usage（source='manual'）
      *   2) 更新内存覆盖表
-     * 说明：manual 是最高优先级，会覆盖同键的 builtin 与 llm 结果
+     * 说明：manual 是最高优先级，会覆盖同键的 builtin 结果
      */
     bool set_manual(const std::string& kind, const std::string& name, const std::string& path,
                     const std::string& category, const std::string& purpose,
                     const std::string& suggestion, std::string* err);
 
-    // 列出当前内存里的全部覆盖条目（manual + llm）
+    // 列出当前内存里的全部覆盖条目
     std::vector<store::UsageRow> list_overrides() const;
 
     /*
      * ====================================================================
      * 步骤：批量本地识别
      * ====================================================================
-     * 返回：命中统计；未命中项收进 pending，供 M6 的 LLM 层消费
+     * 返回：命中统计；未命中项收进 pending，前端可直接展示
      */
     AnalyzeResult analyze(const std::vector<EntityRef>& entities) const;
 
@@ -90,7 +90,7 @@ private:
 
     mutable std::mutex mu_;
     store::Database*   db_{nullptr};
-    // usage_key -> 覆盖条目（manual / llm）
+    // usage_key -> 覆盖条目
     std::unordered_map<std::string, store::UsageRow> overrides_;
 };
 

@@ -85,7 +85,7 @@ struct MinuteBucket {
  *   - kind / name / path 来自联表 dim_entity，**读取时填充，写入时忽略**
  *   - entity_id 指向「聚合实体」（进程 name|path，服务 服务名），
  *     而非采集落库的实例实体（进程名|路径|启动时间），两者 instance_key 段数不同，不会撞键
- *   - source 三级：builtin（内置）| llm（自动回写）| manual（人工覆盖）
+ *   - source 两级：builtin（内置）| manual（人工覆盖）
  *     manual 的记录不得被 lower 优先级覆盖，保护逻辑在 Database::upsert_usage
  */
 struct UsageRow {
@@ -96,7 +96,7 @@ struct UsageRow {
     std::string  category;      // 类别
     std::string  purpose;       // 用途
     std::string  suggestion;    // 清理建议
-    std::string  source;        // builtin | llm | manual
+    std::string  source;        // builtin | manual
     double       confidence{0.0};
     std::int64_t updated_at{0};
 };
@@ -109,5 +109,50 @@ inline std::string aggregate_instance_key(const std::string& kind, const std::st
     }
     return name + "|" + path;
 }
+
+/*
+ * ========================================================================
+ * 类型：EntityStatRow
+ * ========================================================================
+ * 含义：一段区间内单个实体的汇总（/api/stats 的汇总榜行）
+ * 依据：DESIGN D7（统计口径）
+ * 说明：
+ *   - cpu_avg 为区间内各分钟均值的平均，cpu_max 为区间内峰值
+ *   - mem_avg_kb / mem_max_kb 同口径
+ *   - io_*_kb 为区间内各分钟增量之和
+ */
+struct EntityStatRow {
+    std::int64_t entity_id{0};
+    std::string  kind;          // 'process' | 'service'
+    std::string  name;
+    std::string  path;
+    double       cpu_avg{0.0};
+    double       cpu_max{0.0};
+    std::int64_t mem_avg_kb{0};
+    std::int64_t mem_max_kb{0};
+    std::int64_t io_read_kb{0};
+    std::int64_t io_write_kb{0};
+    std::int64_t samples{0};    // 区间内采样点总数
+    std::int64_t buckets{0};    // 区间内有数据的分钟数
+};
+
+/*
+ * ========================================================================
+ * 类型：SeriesPoint
+ * ========================================================================
+ * 含义：时间序列上的一个点（趋势曲线用）
+ * 说明：
+ *   - 全系统序列：cpu_avg 为同桶内各实体 cpu_avg 之和（即整机占用），mem 同理
+ *   - 单实体序列：即该实体在该桶内的原始聚合值
+ */
+struct SeriesPoint {
+    std::int64_t bucket_ts{0};
+    double       cpu_avg{0.0};
+    double       cpu_max{0.0};
+    std::int64_t mem_avg_kb{0};
+    std::int64_t mem_max_kb{0};
+    std::int64_t io_read_kb{0};
+    std::int64_t io_write_kb{0};
+};
 
 }  // namespace perfstat::store

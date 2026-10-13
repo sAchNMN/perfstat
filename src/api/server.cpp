@@ -11,7 +11,9 @@
 #include <json.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <exception>
 #include <string>
 #include <utility>
@@ -23,6 +25,8 @@
 #include "api/service_store.h"
 #include "api/snapshot_store.h"
 #include "api/sse_hub.h"
+#include "store/db.h"
+#include "store/store_types.h"
 
 namespace perfstat::api {
 namespace {
@@ -30,15 +34,78 @@ namespace {
 // SSE 心跳间隔；超过此时长无帧则发注释行，防中间层掐断空闲连接
 constexpr int kSseIdleTimeoutMs = 15000;
 
-// /api/analyze 返回的未命中清单上限（完整清单由 M6 的 LLM 层消费）
+// /api/analyze 返回的未命中清单上限（其余由前端按需展示）
 constexpr std::size_t kPendingPreviewLimit = 50;
+
+// 读取 query 参数并转 int64；缺失或非法时用 fallback
+std::int64_t param_int64(const httplib::Request& req, const char* key, std::int64_t fallback) {
+    const std::string value = req.get_param_value(key);
+    if (value.empty()) {
+        return fallback;
+    }
+    try {
+        return static_cast<std::int64_t>(std::stoll(value));
+    } catch (const std::exception&) {
+        return fallback;
+    }
+}
+
+nlohmann::json series_json(const std::vector<store::SeriesPoint>& points) {
+    nlohmann::json array = nlohmann::json::array();
+    for (const store::SeriesPoint& p : points) {
+        array.push_back(nlohmann::json{
+            {"ts", p.bucket_ts},
+            {"cpu", p.cpu_avg},
+            {"cpu_max", p.cpu_max},
+            {"mem_kb", p.mem_avg_kb},
+            {"mem_max_kb", p.mem_max_kb},
+            {"io_r_kb", p.io_read_kb},
+            {"io_w_kb", p.io_write_kb},
+        });
+    }
+    return array;
+}
+
+// 汇总榜行；rules 非空时附带用途字段，前端可直接显示
+nlohmann::json entity_stats_json(const std::vector<store::EntityStatRow>& rows,
+                                 const analyze::RuleDb* rules) {
+    nlohmann::json array = nlohmann::json::array();
+    for (const store::EntityStatRow& r : rows) {
+        nlohmann::json item = {
+            {"entity_id", r.entity_id},
+            {"kind", r.kind},
+            {"name", r.name},
+            {"path", r.path},
+            {"cpu_avg", r.cpu_avg},
+            {"cpu_max", r.cpu_max},
+            {"mem_avg_kb", r.mem_avg_kb},
+            {"mem_max_kb", r.mem_max_kb},
+            {"io_r_kb", r.io_read_kb},
+            {"io_w_kb", r.io_write_kb},
+            {"samples", r.samples},
+            {"buckets", r.buckets},
+        };
+        if (rules != nullptr) {
+            const analyze::UsageEntry usage = rules->resolve(r.kind, r.name, r.path);
+            item["usage"] = nlohmann::json{
+                {"category", usage.category},
+                {"purpose", usage.purpose},
+                {"suggestion", usage.suggestion},
+                {"source", usage.source},
+                {"known", usage.known},
+            };
+        }
+        array.push_back(std::move(item));
+    }
+    return array;
+}
 
 }  // namespace
 
 HttpServer::HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-                       SseHub* hub, analyze::RuleDb* rules)
+                       SseHub* hub, analyze::RuleDb* rules, store::Database* history_db)
     : options_(std::move(options)), store_(store), service_store_(service_store), hub_(hub),
-      rules_(rules) {
+      rules_(rules), history_db_(history_db) {
     server_ = std::make_unique<httplib::Server>();
 }
 
@@ -120,7 +187,7 @@ void HttpServer::register_routes() {
      * ========================================================================
      * 步骤2.3：用途库（M5）
      * ========================================================================
-     * GET  -> 列出全部覆盖条目（manual / llm）
+     * GET  -> 列出全部人工覆盖条目
      * POST -> 写入人工覆盖，落库并即时生效（source='manual'）
      * 说明：实体定位用 body 里的 kind/name/path，不用路径参数 ——
      *       进程路径含反斜杠与冒号，塞进 URL 既长又易被中间层改写
@@ -190,7 +257,7 @@ void HttpServer::register_routes() {
      * 步骤2.4：批量识别（M5 版只跑本地库）
      * ========================================================================
      * 说明：对当前快照的全部进程与服务做一次本地匹配；
-     *       未命中清单回流给前端，M6 接上 LLM 后消费同一份 pending
+     *       未命中清单回流给前端，供人工补齐
      */
     server_->Post("/api/analyze", [this](const httplib::Request&, httplib::Response& res) {
         if (rules_ == nullptr) {
@@ -225,12 +292,75 @@ void HttpServer::register_routes() {
                             {"total", result.total},
                             {"builtin", result.builtin_hits},
                             {"manual", result.manual_hits},
-                            {"llm", result.llm_hits},
                             {"unknown", result.unknown},
                             {"pending_total", result.pending.size()},
                             {"pending", pending},
                         }.dump(),
                         "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.5：时间段统计（M7 历史页）
+     * ========================================================================
+     * 参数：
+     *   from / to  unix 秒；缺省为最近 1 小时
+     *   bucket     时间桶秒数，缺省 60（前端按区间长短自动放宽）
+     *   top        汇总榜条数，缺省 50
+     *   entity_id  给出时只返回该实体的时间序列，汇总榜留空
+     */
+    server_->Get("/api/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        if (history_db_ == nullptr) {
+            res.status = 503;
+            res.set_content("{\"error\":\"history unavailable in --no-persist mode\"}",
+                            "application/json");
+            return;
+        }
+
+        // 2.5.1 解析区间与粒度
+        const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+        const std::int64_t from_ts = param_int64(req, "from", now - 3600);
+        const std::int64_t to_ts = param_int64(req, "to", now);
+        std::int64_t bucket = param_int64(req, "bucket", 60);
+        if (bucket < 1) {
+            bucket = 60;
+        }
+        const auto top = static_cast<int>(param_int64(req, "top", 50));
+        const std::int64_t entity_id = param_int64(req, "entity_id", 0);
+
+        std::string err;
+        nlohmann::json body = {
+            {"from", from_ts},
+            {"to", to_ts},
+            {"bucket", bucket},
+            {"entity_id", entity_id},
+        };
+
+        // 2.5.2 单实体序列与全系统汇总走两条路
+        if (entity_id > 0) {
+            std::vector<store::SeriesPoint> series;
+            if (!history_db_->query_entity_series(entity_id, from_ts, to_ts, bucket, &series,
+                                                  &err)) {
+                res.status = 500;
+                res.set_content(nlohmann::json{{"error", err}}.dump(), "application/json");
+                return;
+            }
+            body["series"] = series_json(series);
+            body["entities"] = nlohmann::json::array();
+        } else {
+            std::vector<store::EntityStatRow> stats;
+            std::vector<store::SeriesPoint> series;
+            if (!history_db_->query_entity_stats(from_ts, to_ts, top, &stats, &err) ||
+                !history_db_->query_system_series(from_ts, to_ts, bucket, &series, &err)) {
+                res.status = 500;
+                res.set_content(nlohmann::json{{"error", err}}.dump(), "application/json");
+                return;
+            }
+            body["entities"] = entity_stats_json(stats, rules_);
+            body["series"] = series_json(series);
+        }
+
+        res.set_content(body.dump(), "application/json");
     });
 
     /*

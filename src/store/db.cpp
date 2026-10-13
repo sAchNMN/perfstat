@@ -346,7 +346,7 @@ bool Database::upsert_usage(const UsageRow& usage, std::string* err) {
      * ON CONFLICT 后追加 WHERE 的语义：
      *   1) 目标不存在        -> 直接插入
      *   2) 目标是 manual     -> 仅当写入方同为 manual 才更新（D13 保护）
-     *   3) 目标非 manual     -> 无条件更新（builtin/llm 之间可互相刷新）
+     *   3) 目标非 manual     -> 无条件更新（内置结果可反复刷新）
      */
     sqlite3_stmt* stmt = nullptr;
     static const char* kSql =
@@ -431,6 +431,180 @@ bool Database::load_usages(std::vector<UsageRow>* out, std::string* err) {
         row.confidence = sqlite3_column_double(stmt, 8);
         row.updated_at = sqlite3_column_int64(stmt, 9);
         out->push_back(std::move(row));
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::query_entity_stats(std::int64_t from_ts, std::int64_t to_ts, int limit,
+                                  std::vector<EntityStatRow>* out, std::string* err) {
+    if (db_ == nullptr || out == nullptr) {
+        if (err != nullptr) *err = "数据库未打开";
+        return false;
+    }
+    out->clear();
+
+    /*
+     * ========================================================================
+     * 步骤1：按实体分组聚合
+     * ========================================================================
+     * 口径（D7）：
+     *   cpu_avg    -> 区间内各分钟均值的平均
+     *   cpu_max    -> 区间内峰值
+     *   mem_avg_kb -> 同上口径取整
+     *   io_*_kb    -> 区间内各分钟增量之和
+     */
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSql =
+        "SELECT f.entity_id, e.kind, e.name, COALESCE(e.path,''),"
+        "       AVG(f.cpu_avg), MAX(f.cpu_max),"
+        "       CAST(AVG(f.mem_avg_kb) AS INTEGER), MAX(f.mem_max_kb),"
+        "       SUM(f.io_read_kb), SUM(f.io_write_kb),"
+        "       SUM(f.sample_count), COUNT(*)"
+        " FROM fact_metric_1m f JOIN dim_entity e ON e.entity_id = f.entity_id"
+        " WHERE f.bucket_ts >= ?1 AND f.bucket_ts < ?2"
+        " GROUP BY f.entity_id"
+        " ORDER BY AVG(f.cpu_avg) DESC"
+        " LIMIT ?3";
+    if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, from_ts);
+    sqlite3_bind_int64(stmt, 2, to_ts);
+    sqlite3_bind_int(stmt, 3, limit > 0 ? limit : 50);
+
+    /*
+     * ========================================================================
+     * 步骤2：逐行装配
+     * ========================================================================
+     */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        EntityStatRow row;
+        row.entity_id = sqlite3_column_int64(stmt, 0);
+        row.kind = column_text(stmt, 1);
+        row.name = column_text(stmt, 2);
+        row.path = column_text(stmt, 3);
+        row.cpu_avg = sqlite3_column_double(stmt, 4);
+        row.cpu_max = sqlite3_column_double(stmt, 5);
+        row.mem_avg_kb = sqlite3_column_int64(stmt, 6);
+        row.mem_max_kb = sqlite3_column_int64(stmt, 7);
+        row.io_read_kb = sqlite3_column_int64(stmt, 8);
+        row.io_write_kb = sqlite3_column_int64(stmt, 9);
+        row.samples = sqlite3_column_int64(stmt, 10);
+        row.buckets = sqlite3_column_int64(stmt, 11);
+        out->push_back(std::move(row));
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::query_system_series(std::int64_t from_ts, std::int64_t to_ts,
+                                   std::int64_t bucket_seconds, std::vector<SeriesPoint>* out,
+                                   std::string* err) {
+    if (db_ == nullptr || out == nullptr) {
+        if (err != nullptr) *err = "数据库未打开";
+        return false;
+    }
+    out->clear();
+    if (bucket_seconds < 1) {
+        bucket_seconds = 60;
+    }
+
+    /*
+     * ========================================================================
+     * 步骤1：按时间桶汇总全系统
+     * ========================================================================
+     * 口径：同桶内各实体的 cpu_avg 相加即整机占用（每实体本就按整机归一）
+     * 说明：bucket_ts / bucket * bucket 是整数除法取整，得到桶起点
+     */
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSql =
+        "SELECT (bucket_ts / ?3) * ?3 AS t,"
+        "       SUM(cpu_avg), MAX(cpu_max),"
+        "       CAST(SUM(mem_avg_kb) AS INTEGER), MAX(mem_max_kb),"
+        "       SUM(io_read_kb), SUM(io_write_kb)"
+        " FROM fact_metric_1m"
+        " WHERE bucket_ts >= ?1 AND bucket_ts < ?2"
+        " GROUP BY t ORDER BY t";
+    if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, from_ts);
+    sqlite3_bind_int64(stmt, 2, to_ts);
+    sqlite3_bind_int64(stmt, 3, bucket_seconds);
+
+    /*
+     * ========================================================================
+     * 步骤2：逐点装配
+     * ========================================================================
+     */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        SeriesPoint point;
+        point.bucket_ts = sqlite3_column_int64(stmt, 0);
+        point.cpu_avg = sqlite3_column_double(stmt, 1);
+        point.cpu_max = sqlite3_column_double(stmt, 2);
+        point.mem_avg_kb = sqlite3_column_int64(stmt, 3);
+        point.mem_max_kb = sqlite3_column_int64(stmt, 4);
+        point.io_read_kb = sqlite3_column_int64(stmt, 5);
+        point.io_write_kb = sqlite3_column_int64(stmt, 6);
+        out->push_back(point);
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::query_entity_series(std::int64_t entity_id, std::int64_t from_ts,
+                                   std::int64_t to_ts, std::int64_t bucket_seconds,
+                                   std::vector<SeriesPoint>* out, std::string* err) {
+    if (db_ == nullptr || out == nullptr) {
+        if (err != nullptr) *err = "数据库未打开";
+        return false;
+    }
+    out->clear();
+    if (bucket_seconds < 1) {
+        bucket_seconds = 60;
+    }
+
+    /*
+     * ========================================================================
+     * 步骤1：按时间桶汇总单实体
+     * ========================================================================
+     */
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSql =
+        "SELECT (bucket_ts / ?4) * ?4 AS t,"
+        "       AVG(cpu_avg), MAX(cpu_max),"
+        "       CAST(AVG(mem_avg_kb) AS INTEGER), MAX(mem_max_kb),"
+        "       SUM(io_read_kb), SUM(io_write_kb)"
+        " FROM fact_metric_1m"
+        " WHERE entity_id = ?1 AND bucket_ts >= ?2 AND bucket_ts < ?3"
+        " GROUP BY t ORDER BY t";
+    if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+    sqlite3_bind_int64(stmt, 1, entity_id);
+    sqlite3_bind_int64(stmt, 2, from_ts);
+    sqlite3_bind_int64(stmt, 3, to_ts);
+    sqlite3_bind_int64(stmt, 4, bucket_seconds);
+
+    /*
+     * ========================================================================
+     * 步骤2：逐点装配
+     * ========================================================================
+     */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        SeriesPoint point;
+        point.bucket_ts = sqlite3_column_int64(stmt, 0);
+        point.cpu_avg = sqlite3_column_double(stmt, 1);
+        point.cpu_max = sqlite3_column_double(stmt, 2);
+        point.mem_avg_kb = sqlite3_column_int64(stmt, 3);
+        point.mem_max_kb = sqlite3_column_int64(stmt, 4);
+        point.io_read_kb = sqlite3_column_int64(stmt, 5);
+        point.io_write_kb = sqlite3_column_int64(stmt, 6);
+        out->push_back(point);
     }
     sqlite3_finalize(stmt);
     return true;

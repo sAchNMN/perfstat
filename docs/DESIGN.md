@@ -16,11 +16,11 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 | 1 | 按指定时间段统计汇总后台应用性能占用 | store/aggregator + /api/stats + /history |
 | 2 | 实时查看各后台应用资源占用 | collect/sampler + SSE + / |
 | 3 | 读取并列出所有后台服务及占用 | collect/service_collector + /services |
-| 4 | 自动分析判断每个服务的用途 | analyze/rule_db + llm_client |
+| 4 | 自动分析判断每个服务的用途 | analyze/rule_db |
 | 5 | 基于占用数据给出针对性清理建议 | analyze/rule_db + /api/usage |
 | 6 | 预留扩展功能 | 趋势图 / 进程树 / 启动项管理 |
 
-**明确不做**：多机上报汇总、网络 IO 按进程统计（需 ETW）、跨平台。
+**明确不做**：多机上报汇总、网络 IO 按进程统计（需 ETW）、跨平台、外部 API 调用（用途识别只用本地规则库，全程不联网）。
 
 ---
 
@@ -52,12 +52,11 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 | D10 | 「后台」判定 | 无前台可见顶层窗口 ∨ 属于服务宿主；默认屏蔽系统关键进程；前端给「显示系统进程」开关 |
 | D11 | 共享宿主 | 不摊。同宿主服务统一显示宿主真实占用 + 标注「N 个服务共享」+ 可展开 |
 | D12 | 进程标识 | 实例键 = 进程名 + 完整路径 + 启动时间；聚合视图键 = 进程名 + 路径 |
-| D13 | 规则库 | builtin 内置 + llm 自动回写 + manual 人工覆盖，三者共存不互相污染 |
+| D13 | 规则库 | builtin 内置 + manual 人工覆盖，manual 优先级最高；内置规则随 exe 发版更新，不落库 |
 | D14 | 实时推送 | SSE，非轮询非 WebSocket |
-| D15 | LLM 落位 | 主路径直接调 DeepSeek Chat API；仅「允许深查」时起 DeepSeek Harness |
-| D16 | 分发 | 单文件 exe；数据落 `%LOCALAPPDATA%\PerfStat\` |
-| D17 | 轻量化 | 内存 ≤ 40MB，CPU 均值 ≤ 0.3% / 峰值 ≤ 2%；无前端连接时自动降频 |
-| D18 | 服务占用可见性 | SCM 元数据永远完整（名称/显示名/状态/启动类型，零提权依赖）；占用列三态：有值(宿主 PID 可读) / 无权限(宿主 PID 被拒，hover 提示需提权) / 不适用(已停止或无宿主)；共享宿主按 D11 显示宿主聚合占用。提权仅能把「无权限」转为「宿主级聚合」，无法 per-service 归因 |
+| D15 | 分发 | 单文件 exe；数据落 `%LOCALAPPDATA%\PerfStat\` |
+| D16 | 轻量化 | 内存 ≤ 40MB，CPU 均值 ≤ 0.3% / 峰值 ≤ 2%；无前端连接时自动降频 |
+| D17 | 服务占用可见性 | SCM 元数据永远完整（名称/显示名/状态/启动类型，零提权依赖）；占用列三态：有值(宿主 PID 可读) / 无权限(宿主 PID 被拒，hover 提示需提权) / 不适用(已停止或无宿主)；共享宿主按 D11 显示宿主聚合占用。提权仅能把「无权限」转为「宿主级聚合」，无法 per-service 归因 |
 
 ---
 
@@ -73,7 +72,7 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 │  C++ 后端（单进程，托盘常驻）                              │
 │                                                          │
 │  api/        路由、SSE Hub、鉴权                          │
-│  analyze/    规则库、LLM 客户端、熔断器、价格闸门、深查     │
+│  analyze/    规则库（内置规则 + 人工覆盖）                │
 │  store/      SQLite、1 分钟聚合、保留清理（写库独立线程）   │
 │  collect/    进程采集、服务采集、Waitable Timer 调度、环形缓冲│
 │  app/        托盘、配置、路径解析                          │
@@ -84,10 +83,6 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 │  Toolhelp32 / GetProcessTimes / GetProcessMemoryInfo     │
 │  GetProcessIoCounters / EnumServicesStatusEx / 注册表     │
 └──────────────────────────────────────────────────────────┘
-
-外部依赖（可选、可整体关闭）：
-  DeepSeek Chat API  ── 主路径，单轮无状态请求
-  dsh（DeepSeek Harness）── 仅「允许深查」时按需 spawn
 ```
 
 **分层原则**：采集线程只做枚举和计算，绝不碰磁盘；写库收在独立线程；HTTP 线程只读内存与 SQLite。三条线程互不阻塞。
@@ -105,7 +100,7 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 
 **SSE 帧格式**：每帧一条 JSON 数组，元素为当前轮次的实体快照（含 entity_id、cpu、mem、io 增量）。前端用 `EventSource` 接收，直接驱动表格。
 
-**连接数即采样节拍**：有 SSE 订阅者时采样间隔 2s；无订阅者时降到 5s 且暂停落盘聚合。这是 D17 轻量化的主要手段。
+**连接数即采样节拍**：有 SSE 订阅者时采样间隔 2s；无订阅者时降到 5s 且暂停落盘聚合。这是 D16 轻量化的主要手段。
 
 **鉴权**：绑定 `127.0.0.1`；启动时生成 32 字节随机 token 写入进程环境，打开浏览器时带 `?t=<token>`，前端存入 sessionStorage，所有 `/api/*` 请求带 `X-Token`。防止本机其他进程滥用 `/api/actions/*`。
 
@@ -135,7 +130,7 @@ cpu_percent = (Δkernel + Δuser) / (Δwall × 逻辑核数) × 100
 
 ### 6.2 服务采集
 
-`OpenSCManager` + `EnumServicesStatusEx` 枚举全部服务，取服务名、显示名、状态、启动类型、宿主 PID。再把宿主 PID 关联到进程采集结果，得到 D11 的「N 个服务共享」。**宿主占用按 D18 三态呈现**：宿主 PID 在进程采集中 `accessible` 为真才出值；被拒（M1 实测非提权下 108 PID，含 74 svchost）则标「无权限」；共享宿主本质是进程级数字，提权也无法 per-service 归因。
+`OpenSCManager` + `EnumServicesStatusEx` 枚举全部服务，取服务名、显示名、状态、启动类型、宿主 PID。再把宿主 PID 关联到进程采集结果，得到 D11 的「N 个服务共享」。**宿主占用按 D17 三态呈现**：宿主 PID 在进程采集中 `accessible` 为真才出值；被拒（M1 实测非提权下 108 PID，含 74 svchost）则标「无权限」；共享宿主本质是进程级数字，提权也无法 per-service 归因。
 
 ### 6.3 「后台」过滤
 
@@ -162,21 +157,20 @@ is_background =
 
 ### 6.5 用途识别与清理建议
 
-三级瀑布，逐级降级：
+两级查找，逐级降级，全程本地，不产生任何网络请求：
 
 ```
-1. 查本地库 dim_usage
-   命中 → 直接返回（零成本）
+1. 人工覆盖（dim_usage，source = 'manual'）
+   命中 → 直接返回
 
-2. 未命中 → 打包批量问 DeepSeek（走价格闸门 + 熔断器）
-   返回 JSON 数组：{name, category, purpose, suggestion, confidence}
-   → 回写本地库，source = 'llm'
+2. 内置规则表（编译进 exe，进程 89 条 + 服务 61 条）
+   命中 → 返回，source = 'builtin'
 
-3. 调用被拒绝 / 失败 / 熔断 → 返回 { category: '其他', purpose: '未知' }
-   主功能不受影响
+未命中 → { category: '其他', purpose: '未知' }
+   前端按「未识别」渲染，用户可在界面上直接填写补齐
 ```
 
-人工在界面上改过的条目 `source = 'manual'`，后续 LLM 回写**不得覆盖** manual 记录。
+人工覆盖优先级最高，覆盖同键的内置结果；内置规则随 exe 发版更新，不落库。
 
 ---
 
@@ -202,7 +196,7 @@ CREATE TABLE dim_usage (
     category   TEXT,
     purpose    TEXT,
     suggestion TEXT,
-    source     TEXT    NOT NULL,     -- 'builtin' | 'llm' | 'manual'
+    source     TEXT    NOT NULL,     -- 'builtin' | 'manual'
     confidence REAL,
     updated_at INTEGER NOT NULL
 );
@@ -238,7 +232,6 @@ CREATE TABLE dim_service_host (
 %LOCALAPPDATA%\PerfStat\perfstat.db
 %LOCALAPPDATA%\PerfStat\config.json
 %LOCALAPPDATA%\PerfStat\logs\app-YYYYMMDD.log
-%LOCALAPPDATA%\PerfStat\holidays.json
 ```
 
 ---
@@ -253,86 +246,15 @@ CREATE TABLE dim_service_host (
 | GET | `/api/processes/{id}` | 单进程详情 + 趋势 |
 | GET | `/api/services` | 服务列表（含共享宿主标注） |
 | GET | `/api/services/{name}` | 单服务详情 + 宿主展开 |
-| GET | `/api/stats?from&to` | 时间段聚合查询 |
+| GET | `/api/stats?from&to&bucket&top&entity_id` | 时间段聚合：`from`/`to` 秒级时间戳（缺省最近 1 小时）、`bucket` 桶粒度秒（缺省 60）、`top` 汇总行上限（缺省 50）、`entity_id` 存在时只返回该实体序列 |
 | GET | `/api/startup` | 启动项（Run 项 + 启动文件夹） |
-| POST | `/api/analyze` | 批量识别（M5 只跑本地库；M6 接上 LLM 与价格闸门） |
-| GET | `/api/usage` | 列出全部用途覆盖条目（manual / llm） |
+| POST | `/api/analyze` | 本地批量识别（内置规则 + 人工覆盖），返回命中统计与未识别清单 |
+| GET | `/api/usage` | 列出全部人工覆盖条目 |
 | POST | `/api/usage` | 人工覆盖标签（source = manual），实体以 body 里的 kind/name/path 定位 |
 | POST | `/api/actions/terminate` | 结束进程（内部 spawn 提权 helper） |
 | POST | `/api/actions/service` | 停 / 启服务（同上） |
-| GET | `/api/llm/status` | 熔断状态 + 今日用量 + 当前是否高峰 |
-| GET | `/api/settings` | 读配置（**不回显 key**） |
-| POST | `/api/settings` | 写配置 |
-
----
-
-## 9. LLM 层：价格闸门 + 熔断 + 深查
-
-### 9.1 峰谷价格闸门
-
-DeepSeek 采用峰谷定价，**空闲时段价格 = 高峰时段的一半**。
-
-| 时段 | 范围（北京时间） |
-|------|-----------------|
-| 高峰 | 周一至周五（非法定节假日）9:00–12:00、14:00–18:00 |
-| 空闲 | 其余全部，含夜间、周六周日、法定节假日 |
-
-`deepseek-flash`（V4.1-Flash）价格，元 / 百万 tokens：
-
-| 项 | 空闲 | 高峰 |
-|----|------|------|
-| 输入（缓存命中） | 0.02 | 0.04 |
-| 输入（缓存未命中） | 1 | 2 |
-| 输出 | 4 | 8 |
-
-**单次成本估算**：一次批量 20 条实体，输入约 1000 tokens、输出约 800 tokens → 高峰 ≈ 0.84 分，空闲 ≈ 0.42 分。300 次/天全高峰 ≈ 2.5 元/天，全空闲 ≈ 1.26 元/天，月最坏约 75 元。
-
-**闸门行为**：处于高峰时段时，前端弹确认框——
-
-> 当前为 DeepSeek 高峰时段，价格为空闲时段的 2 倍（约 0.84 分/次）。建议等到 12:00 后或 18:00 后再识别。
-
-三个按钮：**现在调用** / **稍后** / **本时段不再问**。
-
-设置里额外给一个更省钱的选项：**高峰时段一律不调用，攒到空闲时段批量跑**（默认关闭）。
-
-**节假日维护**：法定节假日需要人工维护，用一个 `holidays.json` 存「年份 → 日期数组」，每年更新一次；设置里给「今天强制按空闲处理 / 强制按高峰处理」的手动开关兜底。判断逻辑若取不到当年数据，退化为「只按工作日+时段判断」。
-
-### 9.2 熔断机制（六层）
-
-| 层 | 内容 |
-|----|------|
-| L1 收敛触发 | 只对本地库未命中的新实体发请求；命中即返。每轮打包 ≤ 20 条/次 |
-| L2 结构免疫 | 主路径单轮、无状态、不带工具、不带历史——无 tool-use 即无循环载体 |
-| L3 上游限死 | `max_tokens=1024`、`n=1`、非流式；单请求超时 15s，超时即弃并记 unknown，**不重试** |
-| L4 预算闸门 | 三级配额 + 连续失败熔断（见下表） |
-| L5 兜底降级 | 拒绝或失败一律返回「未知/其他」，主功能不受影响 |
-| L6 可观测 | 前端计数器（今日 X/Z 次、token 估算）+ 审计日志 + 一键总开关；key 单独申请，可单独吊销 |
-
-| 参数 | 值 |
-|------|-----|
-| 单次批量上限 | 20 条实体 |
-| 每分钟 | 6 次 |
-| 每小时 | 60 次 |
-| 每日 | 300 次 |
-| 连续失败熔断 | 3 次 → 停 30 分钟，半开放 1 次试探 |
-| 单请求超时 | 15s，不重试 |
-| 单次深查 | 8 轮 / 180s 硬超时，到点 kill 子进程 |
-
-**结论**：主路径物理上不可能死循环；唯一有循环风险的是 harness 深查路径，因此该路径必须带轮次与超时上限。
-
-### 9.3 深查（DeepSeek Harness）
-
-- 仓库：`github.com/deepseek-ai/deepseek-harness`，MIT，TypeScript monorepo，开发者预览版，官方声明会有破坏性变更
-- 它是**agent harness**（类似 Claude Code 的运行时），不是推理 API；自身读 `DEEPSEEK_API_KEY` 调 DeepSeek 接口
-- 依赖 Node `^22.19 || >=24`（本机 22.22.2 满足）
-- 接入方式：以 headless CLI 子进程形式按需 spawn，跑完回收；总开关关闭时完全不启动
-- **适用范围严格限定**：仅在用户对单条实体点「允许深查」时使用。让它去读 exe 版本资源、查注册表发布者、必要时联网搜证，产出用途判断后回写本地库
-
-### 9.4 隐私边界
-
-- 默认外发内容仅：进程名、可执行文件名、发布者、服务显示名与描述
-- **默认不发完整命令行**；单条实体手动点「允许深查」才发更多
-- 总开关关闭后，全程只走本地规则库，不产生任何网络请求
+| GET | `/api/settings` | 读配置 |
+| POST | `/api/settings` | 写配置（采样参数等） |
 
 ---
 
@@ -368,8 +290,7 @@ s/
 │  ├─ collect/                     # process_collector / service_collector
 │  │                               # sampler / ring_buffer
 │  ├─ store/                       # db / aggregator / persist_worker
-│  ├─ analyze/                     # rule_db / llm_client / circuit_breaker
-│  │                               # price_gate / deep_dive
+│  ├─ analyze/                     # usage_types / builtin_rules / rule_db
 │  ├─ api/                         # server / sse_hub / snapshot_store / serialize
 │  ├─ action/                      # privileged_helper
 │  └─ third_party/                 # httplib.h / json.hpp / sqlite3.c,h
@@ -391,7 +312,7 @@ s/
 | `/services` | 服务：列表 + 共享宿主标注与展开 |
 | `/startup` | 启动项：注册表 Run + 启动文件夹，按占用排序 |
 | `/history` | 历史：时间段查询 + 趋势曲线 |
-| `/settings` | 设置：LLM key、总开关、采样参数、熔断用量、日志 |
+| `/settings` | 设置：采样参数、日志 |
 
 ---
 
@@ -402,9 +323,8 @@ s/
 | M1 | 采集骨架 | 控制台打印进程 CPU/内存，与任务管理器数值一致 |
 | M2 | 存储层 | 1 分钟聚合落库，30 天清理生效 |
 | M3 | HTTP + SSE + 最小页面 | 浏览器 `/processes` 实时刷新 |
-| M4 | 服务线 | 服务列表(名称/显示名/状态/启动类型) + 共享宿主标注 + 占用列三态(D18) |
+| M4 | 服务线 | 服务列表(名称/显示名/状态/启动类型) + 共享宿主标注 + 占用列三态(D17) |
 | M5 | 规则库 | builtin 命中 + 人工覆盖生效 |
-| M6 | LLM 层 | 价格闸门弹出、熔断计数正确、深查可用 |
 | M7 | 扩展项 | 趋势图 / 进程树 / 启动项三个页面完成 |
 | M8 | 打包 | 单文件 exe + 托盘 + 自启，内存 CPU 达标 |
 | M9 | WebView2 壳 | 可选，不阻塞前八项 |
@@ -414,9 +334,8 @@ s/
 ## 14. 未决项（编码中再定）
 
 1. 提权 helper 的退出码约定与错误分类
-2. 趋势曲线的降采样算法（按视口宽度抽稀）
-3. dsh headless CLI 的具体调用参数（需读其文档确认）
-4. 单文件 exe 的内嵌资源体积上限（Vue 产物约 100–300KB，预计无压力）
+2. 历史汇总榜按「实例」还是按「程序（name|path）」聚合：现取实例口径（与实时页一致，但同名多实例各占一行）；若日后觉得噪音大，可改为按程序聚合，与用途键同粒度
+3. 单文件 exe 的内嵌资源体积上限（Vue 产物约 100–300KB，预计无压力）
 
 ---
 
@@ -429,7 +348,9 @@ s/
 | M3 HTTP/SSE/页面 | 已完成 | `src/api/`、`src/app/serve_command`、`frontend/src/views/ProcessesView.vue` |
 | M4 服务线 | 已完成 | `src/collect/service_collector` + `src/api/service_store` + `serialize` + `server` 路由 + `serve_command` 接线 + `frontend/src/views/ServicesView.vue` |
 | M5 规则库 | 已完成 | `src/analyze/`（usage_types / builtin_rules / rule_db）+ `store/db` 用途读写 + `/api/usage` 与 `/api/analyze` + `frontend/src/components/UsageCell.vue` |
-| M6 及以后 | 未开始 | — |
+| ~~M6~~ | 已取消 | 原计划的联网识别功能，经用户决定不做；项目定位为纯本地工具 |
+| M7 · 趋势图/历史页 | 已完成 | `store/db` 三个区间查询 + `/api/stats` + `frontend/src/views/HistoryView.vue` + `frontend/src/components/LineChart.vue` |
+| M7 · 进程树 / 启动项 | 未开始 | — |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -496,7 +417,7 @@ frontend/src/api/client.js            新增 getServices
 
 - SCM 元数据（名称/显示名/状态/启动类型/宿主 PID）来自 `EnumServicesStatusEx`，零提权依赖，每轮一次 RPC
 - 启动类型经 `QueryServiceConfig` 取得，每 15 轮（约 30s）周期刷新缓存，避免每轮数百 RPC
-- 占用按 D18 三态：`ok`（宿主 PID 在进程快照中 accessible）/ `denied`（被拒或缺失）/ `na`（未运行或无宿主）
+- 占用按 D17 三态：`ok`（宿主 PID 在进程快照中 accessible）/ `denied`（被拒或缺失）/ `na`（未运行或无宿主）
 - 共享宿主标注（D11）按 SCM 宿主 PID 聚合，**与占用可见性无关**——即使宿主被拒也显示「N 共享」
 - 前端每 2s 轮询 `/api/services`，未走 SSE（服务变化慢，省开销）
 
@@ -512,7 +433,7 @@ M4 验收证据（2026-10-13 实测，非提权会话 `serve --no-persist --no-t
 
 与设计的偏差（有意为之）：
 
-1. **延迟自动启动不单列**：`dwStartType` 对延迟自动服务仍为 `SERVICE_AUTO_START`，无独立枚举值（延迟是 `QueryServiceConfig2` 的单独标志），故映射为 `auto`。D18 仅要求 auto/manual/disabled，符合
+1. **延迟自动启动不单列**：`dwStartType` 对延迟自动服务仍为 `SERVICE_AUTO_START`，无独立枚举值（延迟是 `QueryServiceConfig2` 的单独标志），故映射为 `auto`。D17 仅要求 auto/manual/disabled，符合
 2. **前端轮询而非 SSE**：服务变化频率远低于进程，2s 轮询 `/api/services` 足够，省去 SSE 帧开销；与 DESIGN 第 5 节「SSE 用于实时推送」不冲突（进程仍走 SSE）
 3. **仅枚举 Win32 服务**：`SERVICE_WIN32` 覆盖 svchost 宿主与独立进程服务；驱动（kernel/file-system driver）未纳入，与任务管理器「服务」视图一致；如需驱动可后续加 `SERVICE_DRIVER`
 
@@ -539,7 +460,7 @@ frontend/src/views/{Processes,Services}View.vue  用途列 + 「本地识别」�
 关键实现点：
 
 - **实体键取聚合口径**：用途挂在「进程名 + 路径」「服务名」这一层（D12 的聚合视图键），不随实例启动时间漂移。dim_entity 里聚合实体的 instance_key = `name|path`，与采集落库的 `name|path|start_100ns` 段数不同，不会撞键
-- **manual 保护落在 SQL 里**：`ON CONFLICT(entity_id) DO UPDATE ... WHERE dim_usage.source <> 'manual' OR excluded.source = 'manual'`，M6 的 LLM 回写天然无法污染人工覆盖（D13）
+- **manual 保护落在 SQL 里**：`ON CONFLICT(entity_id) DO UPDATE ... WHERE dim_usage.source <> 'manual' OR excluded.source = 'manual'`，日后任何自动回写来源都无法污染人工覆盖（D13）
 - **锁的边界**：resolve 被采集线程（序列化）与 HTTP 线程（覆盖写）同时调用，故 RuleDb 内部持 mutex；写路径把 DB IO 放在锁外，避免阻塞每 2s 一轮的序列化
 - **用途随帧附带**：序列化时就地解析并写进 JSON，前端零额外请求；覆盖保存后下一帧即生效，无需重启
 - **serve 的两种存储态**：persist 时规则库挂一个独立 SQLite 连接（WAL 支持多连接，与写库线程互不阻塞）；`--no-persist` 时为纯内存，覆盖仅本会话生效
@@ -558,7 +479,7 @@ M5 验收证据（2026-10-13 实测）：
   写入覆盖 → taskkill → 重启 → 启动日志「已有覆盖 1 条」→ GET /api/usage 精确匹配 1 条
   → 该进程 usage.source=manual，path 逐字符一致
 批量识别 POST /api/analyze：total=549（258 进程 + 291 服务），
-  builtin=237 / manual=2 / llm=0 / unknown=310（unknown 收进 pending，留给 M6）
+  builtin=237 / manual=2 / unknown=310（未识别项收进 pending 清单返回前端）
 浏览器（vite 5173 + chromium 截图，0 控制台错误）：
   /processes 用途列 152 行，「浏览器 / Microsoft Edge 主进程」等正常呈现
   /services 用途列 291 行；点单元格弹编辑框（类别 / 用途 / 建议 + 来源提示）
@@ -567,6 +488,49 @@ M5 验收证据（2026-10-13 实测）：
 与设计的偏差（有意为之）：
 
 1. **`POST /api/usage/{id}` 改为 `POST /api/usage`**：实体定位放进 body 的 kind/name/path。进程路径含反斜杠与冒号，塞进 URL 既长又易被中间层改写；改后语义更完整（定位 + 内容一次给全）。另补 `GET /api/usage` 用于列出覆盖
-2. **builtin 规则不落 dim_usage**：内置规则随 exe 发版更新，落库反而会与新版规则打架。dim_usage 只存 manual / llm 这两层「与用户相关」的记录
+2. **builtin 规则不落 dim_usage**：内置规则随 exe 发版更新，落库反而会与新版规则打架。dim_usage 只存 manual 这一层「与用户相关」的记录
 3. **用途解析放在序列化阶段**：每轮约 300 次内存查表，成本可忽略，换来前端零额外请求与「保存即生效」
-4. **`/api/analyze` 尚未接 LLM**：M5 版只跑本地库并把未命中清单回给前端；第 6.5 节的第 2 / 3 级（价格闸门 + 熔断 + DeepSeek 调用）属 M6
+
+**M5 已提交**：`3853f2a`（18 文件 / 1645 插入）。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）→ `d72b09c`（M4）→ `a4ddf3c`（忽略 build-debug/）→ `3853f2a`（M5）。
+
+## M7 历史页与趋势图（已完成，进程树 / 启动项待续）
+
+新增 3 个文件 + 改 7 个：
+
+```text
+src/store/db.h/.cpp                   query_entity_stats / query_system_series / query_entity_series
+src/api/server.h/.cpp                 GET /api/stats（区间聚合 + 曲线 + 单实体序列）
+src/api/client.js                     getStats({from,to,bucket,top,entityId})
+frontend/src/components/LineChart.vue 手写 SVG 折线图（零图表库依赖）
+frontend/src/views/HistoryView.vue    时间范围预设 + 三条曲线 + 汇总榜表格
+frontend/src/router/index.js          /history 路由
+frontend/src/App.vue                  导航加「历史」
+```
+
+关键实现点：
+
+- **不引图表库**：曲线用手写 SVG（`viewBox` 0 0 900 110，`preserveAspectRatio="none"` 横向拉伸）。前端维持「零额外依赖」的既有取向，产物体积不因 M7 上涨
+- **降采样（落实第 14 节原未决项）**：点数超过可用像素宽度时按 `step = n / limit` 等距抽稀，末尾强制保留最后一点，避免长区间撑出上万个 `<path>` 顶点
+- **三个查询各司其职**：`query_entity_stats` 按 `entity_id` GROUP BY（`ORDER BY AVG(cpu_avg) DESC LIMIT ?`）；`query_system_series` 用 `(bucket_ts / ?) * ?` 把分钟桶归并成更粗的桶再求和；`query_entity_series` 只取单实体
+- **桶粒度随区间走**：前端预设 1 小时/60s、6 小时/300s、24 小时/900s、7 天/3600s，区间越长桶越粗，请求与渲染成本恒定
+- **辅助连接复用**：`serve --db` 下规则库与历史查询共用一条辅助 SQLite 连接（WAL 支持多连接，写库线程不被阻塞）；`--no-persist` 时 `/api/stats` 直接返回 503
+- **历史汇总取实例口径**：与 `/processes` 实时页一致，同名多实例各占一行（见第 14 节未决项 2）
+
+M7 验收证据（2026-10-13 实测）：
+
+```text
+造数：perfstat record --interval=1000 --duration=150   -> 落库 382 行 / 3 个分钟桶
+serve --db=build/m7-test.db                            -> 启动打印「历史数据：事实行 382 | 区间 …」
+GET /api/stats?from&to&bucket=60&top=10
+  -> 汇总 10 行 / 曲线 4 点，与 SQLite 直查逐行一致（m7_verify.py：结论：全部一致）
+GET /api/stats?…&entity_id=<id>                        -> 单实体序列点数 == 该实体 buckets
+浏览器 /history（vite 5173 + chromium 截图，0 控制台错误）：
+  汇总榜 50 行（类型/名称/用途/CPU 均值/峰值/内存均值/峰值/读/写/分钟）
+  默认两条曲线「CPU 合计」「内存合计」；点某行（分钟>1）另起该实体 CPU 曲线，图数 2 -> 3
+```
+
+与设计的偏差（有意为之）：
+
+1. **`/api/stats` 参数扩展**：契约原写 `?from&to`，实现补上 `bucket`（桶粒度）、`top`（汇总行上限）、`entity_id`（单实体序列），一次接口覆盖三条曲线与汇总榜
+2. **单实体曲线点数为 1 时不绘制**：区间短或实例存活不足 2 个桶时只显示「该区间无数据」，不画退化线段
+

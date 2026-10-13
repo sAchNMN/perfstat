@@ -70,9 +70,9 @@ UsageEntry RuleDb::resolve_locked(const std::string& kind, const std::string& na
 
     /*
      * ========================================================================
-     * 步骤1：覆盖优先（manual / llm）
+     * 步骤1：覆盖优先（人工覆盖）
      * ========================================================================
-     * 说明：同键只保留一条，manual 与 llm 的互斥由写入端保证
+     * 说明：同键只保留一条，人工覆盖直接覆盖内置结果
      */
     const auto it = overrides_.find(usage_key(kind, name, path));
     if (it != overrides_.end()) {
@@ -209,8 +209,6 @@ AnalyzeResult RuleDb::analyze(const std::vector<EntityRef>& entities) const {
             result.pending.push_back(entity);
         } else if (entry.source == "manual") {
             ++result.manual_hits;
-        } else if (entry.source == "llm") {
-            ++result.llm_hits;
         } else {
             ++result.builtin_hits;
         }

@@ -71,7 +71,7 @@ export async function setUsage(entry) {
   return apiPost('/api/usage', entry)
 }
 
-// GET /api/usage：列出全部覆盖条目（manual / llm）
+// GET /api/usage：列出全部人工覆盖条目
 export async function getUsageOverrides() {
   return apiGet('/api/usage')
 }
@@ -79,4 +79,16 @@ export async function getUsageOverrides() {
 // POST /api/analyze：对当前快照做一次本地识别，返回命中统计与未命中清单
 export async function analyzeUsage() {
   return apiPost('/api/analyze', {})
+}
+
+// GET /api/stats：时间段统计
+// 不给 entityId 时返回汇总榜 + 全系统曲线；给出时返回该实体的时间序列
+export async function getStats({ from, to, bucket = 60, top = 50, entityId = 0 } = {}) {
+  const query = new URLSearchParams()
+  if (from) query.set('from', from)
+  if (to) query.set('to', to)
+  query.set('bucket', bucket)
+  query.set('top', top)
+  if (entityId) query.set('entity_id', entityId)
+  return apiGet('/api/stats?' + query.toString())
 }

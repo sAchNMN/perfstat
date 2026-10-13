@@ -5,8 +5,7 @@
  * 作用：用途识别（三级瀑布）的公共数据模型
  * 依据：
  *   docs/DESIGN.md 6.5（用途识别与清理建议）
- *   docs/DESIGN.md 9（LLM 层）—— 本文件只定义契约，不含网络逻辑
- *   D13（规则库：builtin / llm / manual 三者共存）
+ *   D13（规则库：builtin / manual 共存，manual 优先级最高）
  * 说明：
  *   - 识别对象的稳定键取「聚合实体」口径（进程 名+路径，服务 服务名），
  *     与 D12 的「聚合视图键」一致；用途是软件属性，不随实例启动时间漂移
@@ -26,9 +25,8 @@ namespace perfstat::analyze {
  * 含义：单个实体的用途识别结果
  * source 取值：
  *   builtin —— 命中内置规则表
- *   manual  —— 人工在界面上覆盖过（最高优先级，LLM 回写不得覆盖）
- *   llm     —— LLM 自动回写（M6 接入后产生）
- *   none    —— 三级全部未命中，category/purpose 为兜底值
+ *   manual  —— 人工在界面上覆盖过（最高优先级）
+ *   none    —— 两级全部未命中，category/purpose 为兜底值
  */
 struct UsageEntry {
     std::string category;      // 类别；未命中为 "其他"
@@ -61,13 +59,12 @@ struct EntityRef {
  * 类型：AnalyzeResult
  * ========================================================================
  * 含义：一次批量识别的统计结果
- * 说明：pending 为未命中清单，M6 的 LLM 层直接消费它
+ * 说明：pending 为未命中清单，前端可直接展示供人工补齐
  */
 struct AnalyzeResult {
     int total{0};
     int builtin_hits{0};
     int manual_hits{0};
-    int llm_hits{0};
     int unknown{0};
     std::vector<EntityRef> pending;
 };

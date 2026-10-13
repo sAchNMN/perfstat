@@ -72,7 +72,7 @@ function formatKb(kb) {
   return kb + ' KB'
 }
 
-// 本地批量识别：M5 只跑内置规则 + 人工覆盖，未命中的留给 M6 的 LLM 层
+// 本地批量识别：内置规则 + 人工覆盖两级
 const analyzing = ref(false)
 const analyzeText = ref('')
 
@@ -80,7 +80,7 @@ async function runAnalyze() {
   analyzing.value = true
   try {
     const r = await analyzeUsage()
-    analyzeText.value = `命中 内置 ${r.builtin} / 人工 ${r.manual} / LLM ${r.llm}，未识别 ${r.unknown}（共 ${r.total}）`
+    analyzeText.value = `命中 内置 ${r.builtin} / 人工 ${r.manual}，未识别 ${r.unknown}（共 ${r.total}）`
   } catch (e) {
     analyzeText.value = '识别失败：' + String(e)
   } finally {

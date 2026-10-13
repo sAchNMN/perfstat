@@ -160,20 +160,20 @@ int run_serve_command(const std::vector<std::string>& args) {
 
     /*
      * ========================================================================
-     * 步骤2.1：本地规则库（M5）
+     * 步骤2.1：辅助数据库连接（M5 用途库 + M7 历史查询）
      * ========================================================================
      * 说明：
-     *   1) persist 开启时挂一个独立数据库连接 —— WAL 支持多连接并发，
-     *      规则库写 manual 与写库线程写事实行互不阻塞
-     *   2) --no-persist 时为纯内存模式，人工覆盖仅本会话生效
+     *   1) persist 开启时挂一个独立连接 —— WAL 支持多连接并发，它与写库线程
+     *      互不阻塞：用途覆盖写 dim_usage，历史查询读 fact_metric_1m
+     *   2) --no-persist 时为纯内存规则库，且 /api/stats 返回 503
      */
-    store::Database  rules_db;
+    store::Database  aux_db;
     analyze::RuleDb  rules;
-    if (persist && !rules_db.open(target_db, &err)) {
-        std::fprintf(stderr, "[PerfStat] 规则库数据库打开失败：%s\n", err.c_str());
+    if (persist && !aux_db.open(target_db, &err)) {
+        std::fprintf(stderr, "[PerfStat] 辅助数据库打开失败：%s\n", err.c_str());
         return EXIT_FAILURE;
     }
-    if (!rules.attach(persist ? &rules_db : nullptr, &err)) {
+    if (!rules.attach(persist ? &aux_db : nullptr, &err)) {
         std::fprintf(stderr, "[PerfStat] 规则库载入失败：%s\n", err.c_str());
         return EXIT_FAILURE;
     }
@@ -182,7 +182,7 @@ int run_serve_command(const std::vector<std::string>& args) {
     server_options.port = port;
     server_options.token = token;
     api::HttpServer http(std::move(server_options), &snapshot_store, &service_store, &sse_hub,
-                         &rules);
+                         &rules, persist ? &aux_db : nullptr);
 
     if (!http.bind(&err)) {
         std::fprintf(stderr, "[PerfStat] %s\n", err.c_str());
@@ -217,6 +217,15 @@ int run_serve_command(const std::vector<std::string>& args) {
                 persist ? target_db.c_str() : "关闭", token.empty() ? "关闭" : "开启");
     std::printf("  用途库：已有覆盖 %d 条 | 存储：%s\n",
                 static_cast<int>(rules.override_count()), persist ? "已挂库" : "内存");
+    if (persist) {
+        store::Database::Stats db_stats;
+        if (aux_db.stats(&db_stats, nullptr)) {
+            std::printf("  历史数据：事实行 %lld | 区间 %lld ~ %lld\n",
+                        static_cast<long long>(db_stats.metric_rows),
+                        static_cast<long long>(db_stats.oldest_bucket),
+                        static_cast<long long>(db_stats.newest_bucket));
+        }
+    }
     std::printf("Ctrl+C 退出\n\n");
     std::fflush(stdout);  // 输出被重定向到文件时是块缓冲，不刷就拿不到 token
 
