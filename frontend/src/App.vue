@@ -9,6 +9,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <nav>
         <RouterLink to="/processes">进程</RouterLink>
         <RouterLink to="/services">服务</RouterLink>
+        <RouterLink to="/startup">启动项</RouterLink>
         <RouterLink to="/history">历史</RouterLink>
       </nav>
     </header>

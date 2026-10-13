@@ -6,6 +6,7 @@
  */
 #include "api/serialize.h"
 
+#include <unordered_map>
 #include <utility>
 
 #include "analyze/rule_db.h"
@@ -30,6 +31,23 @@ nlohmann::json usage_json(const analyze::UsageEntry& usage) {
         {"source", usage.source},
         {"known", usage.known},
     };
+}
+
+// ASCII 小写（路径 / 进程名比对用；Windows 路径不区分大小写）
+std::string to_lower_ascii(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return out;
+}
+
+// 取路径里的文件名部分
+std::string base_name(const std::string& path) {
+    const std::size_t pos = path.find_last_of("\\/");
+    return (pos == std::string::npos) ? path : path.substr(pos + 1);
 }
 
 }  // namespace
@@ -114,6 +132,82 @@ std::string serialize_services(const ServiceSnapshot& snapshot, const analyze::R
             item["usage"] = usage_json(rules->resolve("service", s.name, std::string()));
         }
 
+        array.push_back(std::move(item));
+    }
+
+    return array.dump();
+}
+
+std::string serialize_startup(const StartupSnapshot& startup, const Snapshot& processes) {
+    /*
+     * ========================================================================
+     * 步骤1：给当前进程快照建两张索引
+     * ========================================================================
+     * 说明：
+     *   - by_path 优先（最准），退回 by_name 兜住「启动项写的是相对路径 /
+     *     解析出来的是短路径」这类对不上的情况
+     *   - 同名多实例只留第一个，占用取那个实例的值
+     */
+    std::unordered_map<std::string, const ProcessSample*> by_path;
+    std::unordered_map<std::string, const ProcessSample*> by_name;
+    for (const ProcessSample& p : processes.processes) {
+        if (!p.path.empty()) {
+            by_path.emplace(to_lower_ascii(p.path), &p);
+        }
+        if (!p.name.empty()) {
+            by_name.emplace(to_lower_ascii(p.name), &p);
+        }
+    }
+
+    /*
+     * ========================================================================
+     * 步骤2：逐项输出，就地关联占用
+     * ========================================================================
+     * 口径（沿 D17 的三态占用可见性）：
+     *   occ = "ok"     命中且进程可读 -> cpu/mem 出值
+     *         "denied" 命中但进程被拒（多为提权进程）-> cpu/mem 置 0，前端标「无权限」
+     *         "na"     当前没在跑
+     */
+    nlohmann::json array = nlohmann::json::array();
+
+    for (const StartupInfo& it : startup.items) {
+        const ProcessSample* hit = nullptr;
+
+        if (!it.exe_path.empty()) {
+            const auto found = by_path.find(to_lower_ascii(it.exe_path));
+            if (found != by_path.end()) {
+                hit = found->second;
+            }
+        }
+        if (hit == nullptr) {
+            // 退化：用 exe 文件名 / 启动项名去比进程名
+            std::string base = it.exe_path.empty() ? it.name : base_name(it.exe_path);
+            if (base.find('.') == std::string::npos) {
+                base += ".exe";  // 启动项名常常省了扩展名
+            }
+            const auto found = by_name.find(to_lower_ascii(base));
+            if (found != by_name.end()) {
+                hit = found->second;
+            }
+        }
+
+        const bool readable = hit != nullptr && hit->accessible;
+        const char* occ = (hit == nullptr) ? "na" : (readable ? "ok" : "denied");
+
+        nlohmann::json item = {
+            {"name", it.name},
+            {"command", it.command},
+            {"exe", it.exe_path},
+            {"source", it.source},
+            {"scope", it.scope},
+            {"kind", it.kind},
+            {"enabled", it.enabled},
+            {"pid", hit != nullptr ? hit->pid : 0},
+            {"running", hit != nullptr},
+            {"occ", occ},
+            {"cpu", readable ? hit->cpu_percent : 0.0},
+            {"mem_kb", readable ? hit->working_set_bytes / 1024 : 0},
+        };
         array.push_back(std::move(item));
     }
 

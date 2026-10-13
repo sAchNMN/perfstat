@@ -172,6 +172,26 @@ is_background =
 
 人工覆盖优先级最高，覆盖同键的内置结果；内置规则随 exe 发版更新，不落库。
 
+### 6.6 启动项采集（约 30s 一轮）
+
+开机自启项取自五处，全程只读、零提权：
+
+| 来源 | 位置 | 范围 |
+|------|------|------|
+| HKCU Run | `HKCU\...\CurrentVersion\Run` | 当前用户 |
+| HKLM Run（64 位） | `HKLM\...\CurrentVersion\Run`，`KEY_WOW64_64KEY` | 所有用户 |
+| HKLM Run（32 位） | 同上键，`KEY_WOW64_32KEY` | 所有用户 |
+| 启动文件夹（用户） | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` | 当前用户 |
+| 启动文件夹（公共） | `%ProgramData%\...\Programs\Startup` | 所有用户 |
+
+**启用状态**取自 `Explorer\StartupApproved\{Run,StartupFolder}`，与任务管理器「启动应用」页判定一致：值数据是 12 字节 REG_BINARY，首字节最低位为 **0（偶数，0x02/0x06）= 启用**、**1（奇数，0x03/0x07）= 禁用**。
+
+**作用域必须分开**：`StartupApproved` 会残留「对应 Run 值早已被删除」的历史记录，若把 HKCU / HKLM 各视图揉成一个集合按名查找，一个 hive 的残留会误伤另一个 hive 的同名条目。实现上以 `作用域标签 + 名` 作键分桶。
+
+**命令 → 可执行文件**：注册表值可能是 `REG_EXPAND_SZ`，先展开 `%ENV%`；再从命令串抽 exe 路径（带引号取引号内，否则以 `.exe` 结尾处截断，容忍路径中的空格）。启动文件夹里的 `.lnk` 用 `IShellLink` 解析目标（含参数）；带 `SYSTEM` 属性的元数据文件（如 `desktop.ini`）不是自启项，跳过。
+
+**占用在序列化阶段现算**：清单缓存约 30s，但「当前是否在跑、占多少」用当轮的进程快照按 exe 路径匹配（路径不中再退化为按文件名匹配）——这样清单一改不必频繁重读注册表，占用又始终是最新一轮的值。
+
 ---
 
 ## 7. 数据模型
@@ -247,7 +267,7 @@ CREATE TABLE dim_service_host (
 | GET | `/api/services` | 服务列表（含共享宿主标注） |
 | GET | `/api/services/{name}` | 单服务详情 + 宿主展开 |
 | GET | `/api/stats?from&to&bucket&top&entity_id` | 时间段聚合：`from`/`to` 秒级时间戳（缺省最近 1 小时）、`bucket` 桶粒度秒（缺省 60）、`top` 汇总行上限（缺省 50）、`entity_id` 存在时只返回该实体序列 |
-| GET | `/api/startup` | 启动项（Run 项 + 启动文件夹） |
+| GET | `/api/startup` | 启动项：注册表 Run ×3 + 启动文件夹 ×2，含启用状态、命令、解析出的 exe 与当前占用（占用按当轮进程快照现算） |
 | POST | `/api/analyze` | 本地批量识别（内置规则 + 人工覆盖），返回命中统计与未识别清单 |
 | GET | `/api/usage` | 列出全部人工覆盖条目 |
 | POST | `/api/usage` | 人工覆盖标签（source = manual），实体以 body 里的 kind/name/path 定位 |
@@ -288,10 +308,11 @@ s/
 │  ├─ main.cpp                     # 入口：托盘模式 / 子命令分发
 │  ├─ app/                         # tray / config / paths / *_command
 │  ├─ collect/                     # process_collector / service_collector
-│  │                               # sampler / ring_buffer
+│  │                               # startup_collector / sampler / ring_buffer
 │  ├─ store/                       # db / aggregator / persist_worker
 │  ├─ analyze/                     # usage_types / builtin_rules / rule_db
-│  ├─ api/                         # server / sse_hub / snapshot_store / serialize
+│  ├─ api/                         # server / sse_hub / snapshot_store
+│  │                               # service_store / startup_store / serialize
 │  ├─ action/                      # privileged_helper
 │  └─ third_party/                 # httplib.h / json.hpp / sqlite3.c,h
 ├─ frontend/
@@ -351,7 +372,7 @@ s/
 | ~~M6~~ | 已取消 | 原计划的联网识别功能，经用户决定不做；项目定位为纯本地工具 |
 | M7 · 趋势图/历史页 | 已完成 | `store/db` 三个区间查询 + `/api/stats` + `frontend/src/views/HistoryView.vue` + `frontend/src/components/LineChart.vue` |
 | M7 · 进程树 | 已完成 | `collect/process_metrics` 增 ppid + `api/serialize` 输出 ppid + `frontend/src/views/ProcessesView.vue`（表格 ⇄ 进程树切换） |
-| M7 · 启动项 | 未开始 | — |
+| M7 · 启动项 | 已完成 | `collect/startup_collector`（注册表 Run ×3 + 启动文件夹 ×2 + IShellLink）+ `api/startup_store` + `/api/startup` + `frontend/src/views/StartupView.vue` |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -568,6 +589,50 @@ Debug / Release 均编译通过、零警告
   快照 244 条 -> 过滤后 121 条 -> 树可达 121 条（未丢行）；根 56、有子节点 33、最大层级 8
 ```
 
-**进程树已提交**：见下一次提交。
+**进程树已提交**：`0075030`（5 文件 / 251 插入 / 14 删除）。
+
+## M7 启动项（已完成）
+
+新增 4 个文件 + 改 7 个：
+
+```text
+src/collect/startup_collector.h/.cpp   注册表 Run ×3 + 启动文件夹 ×2 + IShellLink 解析
+src/api/startup_store.h/.cpp           启动项清单的线程安全存取（与 service_store 对称）
+src/api/serialize.cpp                  新增 serialize_startup（占用按当轮进程快照现算）
+src/api/server.h/.cpp                  构造增 startup_store + GET /api/startup
+src/app/serve_command.cpp              首采 + 每 15 轮刷新，启动横幅打印项数
+CMakeLists.txt                         补链接 ole32 / uuid（COM 解析 .lnk）
+frontend/src/api/client.js             getStartup
+frontend/src/views/StartupView.vue     列表：名称/命令/来源/范围/状态/占用/PID，可排序
+frontend/src/router/index.js + App.vue  /startup 路由与「启动项」导航
+```
+
+关键实现点：
+
+- **五处来源**：HKCU Run、HKLM Run（64 位视图）、HKLM Run（32 位视图）、用户启动文件夹、公共启动文件夹；注册表用 `KEY_WOW64_*` 显式区分视图，而不是去拼 `WOW6432Node` 路径
+- **启用状态的分桶**：`StartupApproved` 会残留「对应 Run 值早已删除」的历史记录，所以禁用名单必须按「作用域标签 + 名」分桶。最初揉成一个集合按名查找，会拿 HKCU 的残留去误伤 HKLM 的同名条目——这是实现中逼出来的修正
+- **命令 → exe 路径**：`REG_EXPAND_SZ` 先展开 `%ENV%`；带引号取引号内，未加引号则在 `.exe` 结尾处截断（容忍路径含空格）；`.lnk` 走 `IShellLink` 取目标与参数
+- **`desktop.ini` 必须跳过**：启动文件夹里的元数据文件带 `SYSTEM` 属性，不是自启项，任务管理器也不显示它
+- **占用三态（沿 D17）**：`ok` 出值 / `denied` 进程在跑但句柄被拒（多为提权进程，前端标「无权限」）/ `na` 没在跑——避免把「读不到」渲染成 `0 KB` 被误读为「不占内存」
+- **清单缓存 + 占用现算**：清单一改不必频繁重读注册表；序列化时用当轮进程快照匹配（先按 exe 全路径，不中再退化为按文件名），占用始终是最新一轮的值
+- **额外信号**：「已禁用，却在跑」单独标成琥珀色——说明它虽被取消自启，但当下仍以别的方式在运行
+
+M7 启动项验收证据（2026-10-13 实测）：
+
+```text
+Debug / Release 均编译通过、零警告（新增链接 ole32 / uuid 正常）
+启动横幅：启动项 13 项（每约 30s 重读）
+GET /api/startup：13 项，来源分布 HKCU Run 8 / HKLM Run（64 位）4 / 启动文件夹（用户）1
+  启用 2 / 禁用 11；exe 路径解析率 13/13；desktop.ini 已被过滤（0 残留）
+  占用三态：ok 2 / denied 1（Everything 为提权进程）/ na 10
+编码规则交叉核对：StartupApproved 首字节「偶数=启用、奇数=禁用」
+  与 DFIR 分析文章、微软社区答复、Nutanix 文档三处独立来源一致
+浏览器 /startup（vite 5173 + chromium，0 控制台错误）：
+  13 行；默认按 CPU 降序；「仅看启用」后 2 行（等于启用数）；
+  点「名称」表头切换为按名降序（Steam / StartAUEP / Snipaste / SecurityHealth）
+```
+
+**启动项已提交**：见下一次提交。
+
 
 

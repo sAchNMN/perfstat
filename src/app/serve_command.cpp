@@ -28,9 +28,11 @@
 #include "api/service_store.h"
 #include "api/snapshot_store.h"
 #include "api/sse_hub.h"
+#include "api/startup_store.h"
 #include "app/paths.h"
 #include "collect/sampler.h"
 #include "collect/service_collector.h"
+#include "collect/startup_collector.h"
 #include "store/aggregator.h"
 #include "store/db.h"
 #include "store/persist_worker.h"
@@ -156,7 +158,23 @@ int run_serve_command(const std::vector<std::string>& args) {
 
     api::SnapshotStore snapshot_store;
     api::ServiceStore   service_store;
+    api::StartupStore   startup_store;
     api::SseHub        sse_hub;
+
+    /*
+     * ========================================================================
+     * 步骤2.0：启动项首采
+     * ========================================================================
+     * 说明：注册表 + 启动文件夹一次读完，之后每 15 轮（约 30s）刷新；
+     *       「当前是否在跑」不在这里算，序列化时用进程快照现算
+     */
+    StartupCollector startup_collector;
+    {
+        api::StartupSnapshot initial;
+        initial.ts = static_cast<std::int64_t>(std::time(nullptr));
+        initial.items = startup_collector.collect();
+        startup_store.update(std::move(initial));
+    }
 
     /*
      * ========================================================================
@@ -181,8 +199,8 @@ int run_serve_command(const std::vector<std::string>& args) {
     api::ServerOptions server_options;
     server_options.port = port;
     server_options.token = token;
-    api::HttpServer http(std::move(server_options), &snapshot_store, &service_store, &sse_hub,
-                         &rules, persist ? &aux_db : nullptr);
+    api::HttpServer http(std::move(server_options), &snapshot_store, &service_store,
+                         &startup_store, &sse_hub, &rules, persist ? &aux_db : nullptr);
 
     if (!http.bind(&err)) {
         std::fprintf(stderr, "[PerfStat] %s\n", err.c_str());
@@ -217,6 +235,8 @@ int run_serve_command(const std::vector<std::string>& args) {
                 persist ? target_db.c_str() : "关闭", token.empty() ? "关闭" : "开启");
     std::printf("  用途库：已有覆盖 %d 条 | 存储：%s\n",
                 static_cast<int>(rules.override_count()), persist ? "已挂库" : "内存");
+    std::printf("  启动项：%d 项（每约 30s 重读）\n",
+                static_cast<int>(startup_store.get().items.size()));
     if (persist) {
         store::Database::Stats db_stats;
         if (aux_db.stats(&db_stats, nullptr)) {
@@ -272,7 +292,15 @@ int run_serve_command(const std::vector<std::string>& args) {
         service_snapshot.services = service_collector.collect_round(samples, context.round);
         service_store.update(std::move(service_snapshot));
 
-        // 5.4 落库
+        // 5.4 启动项每 15 轮（约 30s）重读一次注册表与启动文件夹
+        if (context.round == 1 || context.round % 15 == 0) {
+            api::StartupSnapshot startup_snapshot;
+            startup_snapshot.ts = now;
+            startup_snapshot.items = startup_collector.collect();
+            startup_store.update(std::move(startup_snapshot));
+        }
+
+        // 5.5 落库
         if (persist) {
             store::MinuteBucket bucket;
             if (aggregator.add_round(samples, now, &bucket)) {

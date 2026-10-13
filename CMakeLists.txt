@@ -65,9 +65,12 @@ target_compile_definitions(perfstat PRIVATE
 #   psapi    -> GetProcessMemoryInfo
 #   ws2_32   -> cpp-httplib 套接字
 #   advapi32 -> 服务 (SCM) 与注册表
+#   shell32  -> ShellExecute / SHGetKnownFolderPath
+#   ole32    -> COM（IShellLink 解析启动文件夹里的 .lnk）
+#   uuid     -> CLSID_ShellLink / IID_IShellLinkW 等 GUID
 # ---------------------------------------------------------------------------
 if(WIN32)
-    target_link_libraries(perfstat PRIVATE psapi ws2_32 advapi32 shell32)
+    target_link_libraries(perfstat PRIVATE psapi ws2_32 advapi32 shell32 ole32 uuid)
 
     # 目标平台 Windows 10+（DESIGN 定为 Windows 11）：
     # cpp-httplib 依赖 CreateFile2 等 Win8+ API，并显式拒绝低版本 SDK 目标，

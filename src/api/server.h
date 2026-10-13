@@ -25,6 +25,7 @@ namespace perfstat::api {
 
 class SnapshotStore;
 class ServiceStore;
+class StartupStore;
 class SseHub;
 
 }  // namespace perfstat::api
@@ -57,7 +58,8 @@ public:
      *   history_db 历史查询连接（M7 的历史页读它）；--no-persist 时传 nullptr
      */
     HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-               SseHub* hub, analyze::RuleDb* rules, store::Database* history_db);
+               StartupStore* startup_store, SseHub* hub, analyze::RuleDb* rules,
+               store::Database* history_db);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -84,6 +86,7 @@ private:
     ServerOptions                    options_;
     SnapshotStore*                   store_{nullptr};
     ServiceStore*                    service_store_{nullptr};
+    StartupStore*                    startup_store_{nullptr};
     SseHub*                          hub_{nullptr};
     analyze::RuleDb*                 rules_{nullptr};
     store::Database*                 history_db_{nullptr};

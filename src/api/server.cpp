@@ -25,6 +25,7 @@
 #include "api/service_store.h"
 #include "api/snapshot_store.h"
 #include "api/sse_hub.h"
+#include "api/startup_store.h"
 #include "store/db.h"
 #include "store/store_types.h"
 
@@ -103,9 +104,10 @@ nlohmann::json entity_stats_json(const std::vector<store::EntityStatRow>& rows,
 }  // namespace
 
 HttpServer::HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-                       SseHub* hub, analyze::RuleDb* rules, store::Database* history_db)
-    : options_(std::move(options)), store_(store), service_store_(service_store), hub_(hub),
-      rules_(rules), history_db_(history_db) {
+                       StartupStore* startup_store, SseHub* hub, analyze::RuleDb* rules,
+                       store::Database* history_db)
+    : options_(std::move(options)), store_(store), service_store_(service_store),
+      startup_store_(startup_store), hub_(hub), rules_(rules), history_db_(history_db) {
     server_ = std::make_unique<httplib::Server>();
 }
 
@@ -176,6 +178,17 @@ void HttpServer::register_routes() {
             return;
         }
         res.set_content(result.dump(), "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.3：启动项（注册表 Run + 启动文件夹）
+     * ========================================================================
+     * 说明：清单取缓存（每约 30s 重读一次注册表），占用用当前进程快照现算
+     */
+    server_->Get("/api/startup", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_content(serialize_startup(startup_store_->get(), store_->get()),
+                        "application/json");
     });
 
     server_->Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {

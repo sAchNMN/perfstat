@@ -16,6 +16,7 @@
 
 #include "api/service_store.h"
 #include "api/snapshot_store.h"
+#include "api/startup_store.h"
 
 namespace perfstat::analyze {
 class RuleDb;
@@ -35,5 +36,13 @@ std::string serialize_processes(const Snapshot& snapshot, const analyze::RuleDb*
  * 字段：name/display/state/start_type/host_pid/occ/cpu/mem_kb/shared/uk/usage
  */
 std::string serialize_services(const ServiceSnapshot& snapshot, const analyze::RuleDb* rules);
+
+/*
+ * 启动项数组 -> JSON 字符串
+ * 字段：name/command/exe/source/scope/kind/enabled/pid/running/cpu/mem_kb
+ * 说明：清单本身是静态的（startup 快照），占用则用「当前进程快照」现算 ——
+ *       这样清单不必频繁重读注册表，占用又始终是最新一轮的值
+ */
+std::string serialize_startup(const StartupSnapshot& startup, const Snapshot& processes);
 
 }  // namespace perfstat::api

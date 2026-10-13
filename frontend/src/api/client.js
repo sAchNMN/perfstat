@@ -65,6 +65,11 @@ export async function getServices() {
   return apiGet('/api/services')
 }
 
+// GET /api/startup：开机自启项（注册表 Run + 启动文件夹），占用为当前进程快照现值
+export async function getStartup() {
+  return apiGet('/api/startup')
+}
+
 // POST /api/usage：写入人工覆盖（source = manual），下一帧快照即生效
 // entry: { kind, name, path, category, purpose, suggestion }
 export async function setUsage(entry) {
