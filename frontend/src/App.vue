@@ -8,6 +8,7 @@ import { RouterLink, RouterView } from 'vue-router'
       <span class="brand">PerfStat</span>
       <nav>
         <RouterLink to="/processes">进程</RouterLink>
+        <RouterLink to="/services">服务</RouterLink>
       </nav>
     </header>
     <main class="content">

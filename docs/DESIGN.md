@@ -57,6 +57,7 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 | D15 | LLM 落位 | 主路径直接调 DeepSeek Chat API；仅「允许深查」时起 DeepSeek Harness |
 | D16 | 分发 | 单文件 exe；数据落 `%LOCALAPPDATA%\PerfStat\` |
 | D17 | 轻量化 | 内存 ≤ 40MB，CPU 均值 ≤ 0.3% / 峰值 ≤ 2%；无前端连接时自动降频 |
+| D18 | 服务占用可见性 | SCM 元数据永远完整（名称/显示名/状态/启动类型，零提权依赖）；占用列三态：有值(宿主 PID 可读) / 无权限(宿主 PID 被拒，hover 提示需提权) / 不适用(已停止或无宿主)；共享宿主按 D11 显示宿主聚合占用。提权仅能把「无权限」转为「宿主级聚合」，无法 per-service 归因 |
 
 ---
 
@@ -134,7 +135,7 @@ cpu_percent = (Δkernel + Δuser) / (Δwall × 逻辑核数) × 100
 
 ### 6.2 服务采集
 
-`OpenSCManager` + `EnumServicesStatusEx` 枚举全部服务，取服务名、显示名、状态、启动类型、宿主 PID。再把宿主 PID 关联到进程采集结果，得到 D11 的「N 个服务共享」。
+`OpenSCManager` + `EnumServicesStatusEx` 枚举全部服务，取服务名、显示名、状态、启动类型、宿主 PID。再把宿主 PID 关联到进程采集结果，得到 D11 的「N 个服务共享」。**宿主占用按 D18 三态呈现**：宿主 PID 在进程采集中 `accessible` 为真才出值；被拒（M1 实测非提权下 108 PID，含 74 svchost）则标「无权限」；共享宿主本质是进程级数字，提权也无法 per-service 归因。
 
 ### 6.3 「后台」过滤
 
@@ -400,7 +401,7 @@ s/
 | M1 | 采集骨架 | 控制台打印进程 CPU/内存，与任务管理器数值一致 |
 | M2 | 存储层 | 1 分钟聚合落库，30 天清理生效 |
 | M3 | HTTP + SSE + 最小页面 | 浏览器 `/processes` 实时刷新 |
-| M4 | 服务线 | 服务列表 + 共享宿主标注 |
+| M4 | 服务线 | 服务列表(名称/显示名/状态/启动类型) + 共享宿主标注 + 占用列三态(D18) |
 | M5 | 规则库 | builtin 命中 + 人工覆盖生效 |
 | M6 | LLM 层 | 价格闸门弹出、熔断计数正确、深查可用 |
 | M7 | 扩展项 | 趋势图 / 进程树 / 启动项三个页面完成 |
@@ -426,6 +427,7 @@ s/
 | M2 存储层 | 已完成 | `src/store/`、`src/app/record_command`、`src/app/db_command` |
 | M3 HTTP/SSE/页面 | 已完成 | `src/api/`、`src/app/serve_command`、`frontend/src/views/ProcessesView.vue` |
 | M4 及以后 | 未开始 | — |
+| M4 服务线 | 已完成 | `src/collect/service_collector` + `src/api/service_store` + `serialize` + `server` 路由 + `serve_command` 接线 + `frontend/src/views/ServicesView.vue` |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -471,3 +473,45 @@ M3 实现说明：
 3. 前端 dev 期走 vite proxy（`/api` → `127.0.0.1:17321`），生产期由 exe 内嵌同源直连，前端代码用相对路径，不需区分。
 4. 前端页面当前只做 `/processes` 表格（排序 / 过滤 / 后台开关），趋势图与进程树属 M7。
 5. 「无订阅者降频到 5s」尚未实现，留待 M8 与轻量化预算一并处理。
+
+## M4 服务线（已完成）
+
+新增 6 个文件 + 改 4 个：
+
+```text
+src/collect/service_collector.h/.cpp  SCM 枚举 + 三态占用关联
+src/api/service_store.h/.cpp          ServiceSnapshot 线程安全存取
+src/api/serialize.cpp                 新增 serialize_services
+src/api/server.cpp/.h                 新增 /api/services 与 /api/services/{name}
+src/app/serve_command.cpp             采样回调里 collect_round + service_store.update
+frontend/src/views/ServicesView.vue   服务页（轮询 + 三态列 + 共享标注）
+frontend/src/router/index.js          /services 路由
+frontend/src/App.vue                  导航加「服务」
+frontend/src/api/client.js            新增 getServices
+```
+
+关键实现点：
+
+- SCM 元数据（名称/显示名/状态/启动类型/宿主 PID）来自 `EnumServicesStatusEx`，零提权依赖，每轮一次 RPC
+- 启动类型经 `QueryServiceConfig` 取得，每 15 轮（约 30s）周期刷新缓存，避免每轮数百 RPC
+- 占用按 D18 三态：`ok`（宿主 PID 在进程快照中 accessible）/ `denied`（被拒或缺失）/ `na`（未运行或无宿主）
+- 共享宿主标注（D11）按 SCM 宿主 PID 聚合，**与占用可见性无关**——即使宿主被拒也显示「N 共享」
+- 前端每 2s 轮询 `/api/services`，未走 SSE（服务变化慢，省开销）
+
+M4 验收证据（2026-10-13 实测，非提权会话 `serve --no-persist --no-token`）：
+
+```text
+/api/services HTTP 200，共 291 个服务
+三态分布：na 187 / denied 96 / ok 8
+共享宿主服务 13 个，单宿主最多 5 个服务同驻（如 BFE 与同宿主服务共享 PID 4136）
+/api/services/{name} 单服务详情 HTTP 200，返回对应条目
+前端 npm run build：29 模块转换，0 错误，产物 100KB
+```
+
+与设计的偏差（有意为之）：
+
+1. **延迟自动启动不单列**：`dwStartType` 对延迟自动服务仍为 `SERVICE_AUTO_START`，无独立枚举值（延迟是 `QueryServiceConfig2` 的单独标志），故映射为 `auto`。D18 仅要求 auto/manual/disabled，符合
+2. **前端轮询而非 SSE**：服务变化频率远低于进程，2s 轮询 `/api/services` 足够，省去 SSE 帧开销；与 DESIGN 第 5 节「SSE 用于实时推送」不冲突（进程仍走 SSE）
+3. **仅枚举 Win32 服务**：`SERVICE_WIN32` 覆盖 svchost 宿主与独立进程服务；驱动（kernel/file-system driver）未纳入，与任务管理器「服务」视图一致；如需驱动可后续加 `SERVICE_DRIVER`
+
+**M4 尚未提交**（待用户确认后统一提交）。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）。

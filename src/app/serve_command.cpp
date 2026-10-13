@@ -24,10 +24,12 @@
 
 #include "api/serialize.h"
 #include "api/server.h"
+#include "api/service_store.h"
 #include "api/snapshot_store.h"
 #include "api/sse_hub.h"
 #include "app/paths.h"
 #include "collect/sampler.h"
+#include "collect/service_collector.h"
 #include "store/aggregator.h"
 #include "store/persist_worker.h"
 
@@ -151,12 +153,13 @@ int run_serve_command(const std::vector<std::string>& args) {
     const std::string token = use_token ? make_token() : std::string();
 
     api::SnapshotStore snapshot_store;
+    api::ServiceStore   service_store;
     api::SseHub        sse_hub;
 
     api::ServerOptions server_options;
     server_options.port = port;
     server_options.token = token;
-    api::HttpServer http(std::move(server_options), &snapshot_store, &sse_hub);
+    api::HttpServer http(std::move(server_options), &snapshot_store, &service_store, &sse_hub);
 
     if (!http.bind(&err)) {
         std::fprintf(stderr, "[PerfStat] %s\n", err.c_str());
@@ -208,6 +211,7 @@ int run_serve_command(const std::vector<std::string>& args) {
      */
     Sampler sampler(interval_ms);
     store::MinuteAggregator aggregator;
+    ServiceCollector service_collector;
 
     sampler.run([&](const perfstat::ProcessSampleList& samples,
                     const perfstat::SampleContext& context) {
@@ -224,10 +228,17 @@ int run_serve_command(const std::vector<std::string>& args) {
             sse_hub.broadcast(api::serialize_processes(snapshot));
         }
 
-        // 5.2 刷新快照
+        // 5.2 刷新进程快照
         snapshot_store.update(std::move(snapshot));
 
-        // 5.3 落库
+        // 5.3 刷新服务快照（D18 三态占用，关联本轮进程快照）
+        api::ServiceSnapshot service_snapshot;
+        service_snapshot.ts = now;
+        service_snapshot.round = context.round;
+        service_snapshot.services = service_collector.collect_round(samples, context.round);
+        service_store.update(std::move(service_snapshot));
+
+        // 5.4 落库
         if (persist) {
             store::MinuteBucket bucket;
             if (aggregator.add_round(samples, now, &bucket)) {

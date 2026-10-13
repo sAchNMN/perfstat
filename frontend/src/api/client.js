@@ -46,3 +46,8 @@ export function openRealtime({ onFrame, onOpen, onError }) {
 
   return source
 }
+
+// GET /api/services：服务列表（含 D18 三态占用）
+export async function getServices() {
+  return apiGet('/api/services')
+}

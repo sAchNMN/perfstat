@@ -10,11 +10,15 @@
 
 #include <string>
 
+#include "api/service_store.h"
 #include "api/snapshot_store.h"
 
 namespace perfstat::api {
 
 // 进程数组 -> JSON 字符串；字段：pid/name/path/bg/sys/ok/cpu/mem_kb/io_*_kb
 std::string serialize_processes(const Snapshot& snapshot);
+
+// 服务数组 -> JSON 字符串；字段：name/display/state/start_type/host_pid/occ/cpu/mem_kb/shared
+std::string serialize_services(const ServiceSnapshot& snapshot);
 
 }  // namespace perfstat::api

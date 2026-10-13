@@ -24,6 +24,7 @@ class Response;
 namespace perfstat::api {
 
 class SnapshotStore;
+class ServiceStore;
 class SseHub;
 
 struct ServerOptions {
@@ -35,7 +36,8 @@ struct ServerOptions {
 
 class HttpServer {
 public:
-    HttpServer(ServerOptions options, SnapshotStore* store, SseHub* hub);
+    HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
+               SseHub* hub);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -61,6 +63,7 @@ private:
 
     ServerOptions                    options_;
     SnapshotStore*                   store_{nullptr};
+    ServiceStore*                    service_store_{nullptr};
     SseHub*                          hub_{nullptr};
     std::unique_ptr<httplib::Server> server_;
     std::thread                      thread_;

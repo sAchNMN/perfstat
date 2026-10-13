@@ -8,10 +8,13 @@
 
 #include <httplib.h>
 
+#include <json.hpp>
+
 #include <cstdio>
 #include <utility>
 
 #include "api/serialize.h"
+#include "api/service_store.h"
 #include "api/snapshot_store.h"
 #include "api/sse_hub.h"
 
@@ -23,8 +26,9 @@ constexpr int kSseIdleTimeoutMs = 15000;
 
 }  // namespace
 
-HttpServer::HttpServer(ServerOptions options, SnapshotStore* store, SseHub* hub)
-    : options_(std::move(options)), store_(store), hub_(hub) {
+HttpServer::HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
+                         SseHub* hub)
+    : options_(std::move(options)), store_(store), service_store_(service_store), hub_(hub) {
     server_ = std::make_unique<httplib::Server>();
 }
 
@@ -54,6 +58,47 @@ void HttpServer::register_routes() {
      */
     server_->Get("/api/processes", [this](const httplib::Request&, httplib::Response& res) {
         res.set_content(serialize_processes(store_->get()), "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.1：服务列表（含 D18 三态占用）
+     * ========================================================================
+     */
+    server_->Get("/api/services", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_content(serialize_services(service_store_->get()), "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.2：单服务详情（按服务名过滤）
+     * ========================================================================
+     */
+    server_->Get("/api/services/(.+)", [this](const httplib::Request& req,
+                                              httplib::Response& res) {
+        const std::string name = req.matches[1];
+        nlohmann::json result = nlohmann::json::array();
+        for (const auto& s : service_store_->get().services) {
+            if (s.name == name) {
+                result.push_back(nlohmann::json{
+                    {"name", s.name},
+                    {"display", s.display_name},
+                    {"state", s.state},
+                    {"start_type", s.start_type},
+                    {"host_pid", s.host_pid},
+                    {"occ", s.occ_state},
+                    {"cpu", s.cpu_percent},
+                    {"mem_kb", s.working_set_bytes / 1024},
+                    {"shared", s.shared_count},
+                });
+            }
+        }
+        if (result.empty()) {
+            res.status = 404;
+            res.set_content("{\"error\":\"service not found\"}", "application/json");
+            return;
+        }
+        res.set_content(result.dump(), "application/json");
     });
 
     server_->Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
