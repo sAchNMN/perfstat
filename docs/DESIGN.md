@@ -362,10 +362,10 @@ s/
 │  └─ EmbedFrontend.cmake          # vitE 产物 → C 数组
 ├─ src/
 │  ├─ main.cpp                     # 入口：托盘模式 / 子命令分发
-│  ├─ app/                         # tray / config / paths
+│  ├─ app/                         # tray / config / paths / *_command
 │  ├─ collect/                     # process_collector / service_collector
 │  │                               # sampler / ring_buffer
-│  ├─ store/                       # db / aggregator / retention
+│  ├─ store/                       # db / aggregator / persist_worker
 │  ├─ analyze/                     # rule_db / llm_client / circuit_breaker
 │  │                               # price_gate / deep_dive
 │  ├─ api/                         # server / routes_* / sse_hub
@@ -415,3 +415,38 @@ s/
 2. 趋势曲线的降采样算法（按视口宽度抽稀）
 3. dsh headless CLI 的具体调用参数（需读其文档确认）
 4. 单文件 exe 的内嵌资源体积上限（Vue 产物约 100–300KB，预计无压力）
+
+---
+
+## 15. 实现进度
+
+| 里程碑 | 状态 | 交付物 |
+|--------|------|--------|
+| M1 采集骨架 | 已完成 | `src/collect/`、`src/app/collect_command` |
+| M2 存储层 | 已完成 | `src/store/`、`src/app/record_command`、`src/app/db_command` |
+| M3 及以后 | 未开始 | — |
+
+第三方单文件库（`src/third_party/`）：
+
+| 库 | 版本 | 文件 |
+|----|------|------|
+| cpp-httplib | 0.60.1 | httplib.h |
+| nlohmann/json | 3.12.0 | json.hpp |
+| SQLite | 3.54.0 | sqlite3.c / sqlite3.h / sqlite3ext.h |
+
+构建要点：`project()` 启用 C 语言编译 sqlite3.c；`_WIN32_WINNT=0x0A00`（httplib 拒绝低于 Win10 的目标）。
+
+M2 验收证据（2026-10-13 实测）：
+
+```text
+perfstat record --interval=1000 --duration=75   -> 落库 253 行，2 个分钟桶
+perfstat db --stats                             -> dim_entity 127 / fact 253
+perfstat db --purge --days=30                   -> 删除 0 行（数据在窗口内）
+perfstat db --purge --days=0                    -> 删除 253 行（清理路径有效）
+```
+
+与设计的偏差（有意为之）：
+
+1. **retention 并入 persist_worker**：清理同属写操作，必须与落库串行在同一线程，独立成模块反而割裂。第 11 节文件清单已同步。
+2. **ring_buffer 延后到 M3**：环形缓冲只服务 SSE 实时推送，落库走「分钟累加器」即可。M2 不引入。
+3. 新增 CLI 子命令 `record`（采集落库）与 `db`（概况 / 清理），作为 M2 验证入口；M8 托盘模式复用同一套 store 组件。

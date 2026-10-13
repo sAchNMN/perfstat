@@ -7,7 +7,9 @@
  * 操作要点：
  *   1) 无参      -> 托盘常驻模式（M8 接入）
  *   2) collect   -> 采集骨架调试，前台打印榜单（M1）
- *   3) 其他子命令 -> 提权 helper，单次执行后退出（M6 接入）
+ *   3) record    -> 采集并落库（M2）
+ *   4) db        -> 数据库概况与保留清理（M2）
+ *   5) 其他子命令 -> 提权 helper，单次执行后退出（M6 接入）
  */
 
 #include <windows.h>
@@ -18,6 +20,8 @@
 #include <vector>
 
 #include "app/collect_command.h"
+#include "app/db_command.h"
+#include "app/record_command.h"
 
 namespace {
 
@@ -52,7 +56,17 @@ int main(int argc, char** argv) {
             return perfstat::app::run_collect_command(args);
         }
 
-        // 2.2 提权 helper 占位（M6 接入）
+        // 2.2 采集落库（M2）
+        if (command == "record") {
+            return perfstat::app::run_record_command(args);
+        }
+
+        // 2.3 数据库概况与保留清理（M2）
+        if (command == "db") {
+            return perfstat::app::run_db_command(args);
+        }
+
+        // 2.4 提权 helper 占位（M6 接入）
         std::printf("[%s] 模式=提权 helper，子命令=%s（骨架，动作分发待接入 M6）\n", kAppName,
                     command.c_str());
         return EXIT_SUCCESS;
@@ -66,5 +80,7 @@ int main(int argc, char** argv) {
      */
     std::printf("[%s] 模式=托盘常驻（骨架，待接入 M8）\n", kAppName);
     std::printf("[%s] 试运行采集骨架：perfstat collect\n", kAppName);
+    std::printf("[%s] 试运行采集落库：perfstat record --duration=70\n", kAppName);
+    std::printf("[%s] 查看数据库概况：perfstat db --stats\n", kAppName);
     return EXIT_SUCCESS;
 }
