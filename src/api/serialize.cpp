@@ -49,6 +49,7 @@ std::string serialize_processes(const Snapshot& snapshot, const analyze::RuleDb*
     for (const ProcessSample& sample : snapshot.processes) {
         nlohmann::json item = {
             {"pid", sample.pid},
+            {"ppid", sample.ppid},
             {"name", sample.name},
             {"path", sample.path},
             {"bg", sample.is_background},

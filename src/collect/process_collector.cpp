@@ -116,6 +116,7 @@ ProcessSampleList ProcessCollector::collect_round() {
         do {
             ProcessSample sample;
             sample.pid = entry.th32ProcessID;
+            sample.ppid = entry.th32ParentProcessID;
             sample.name = wide_to_utf8(entry.szExeFile);
             read_process(sample, wall_seconds, next);
             out.push_back(std::move(sample));

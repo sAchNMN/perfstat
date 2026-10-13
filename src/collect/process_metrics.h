@@ -26,12 +26,14 @@ namespace perfstat {
  *   2) GetProcessMemoryInfo   -> working_set / private
  *   3) GetProcessIoCounters   -> io 累计与增量
  *   4) QueryFullProcessImageName -> path
+ *   父进程 PID 来自枚举用的 PROCESSENTRY32W.th32ParentProcessID
  * 说明：
  *   - cpu_percent 为「占整机百分比」，分母按逻辑核数归一
  *   - 首轮无上一轮基准，cpu_percent 与 io_*_delta 均为 0
  */
 struct ProcessSample {
     std::uint32_t pid{0};
+    std::uint32_t ppid{0};       // 父进程 PID（构建进程树用），0 表示无父/已退出
     std::string   name;          // 进程名，含扩展名
     std::string   path;          // 可执行文件完整路径，取不到则为空
     std::string   instance_key;  // D12：name|path|start_time_100ns

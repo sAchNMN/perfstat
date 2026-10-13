@@ -112,7 +112,7 @@ Windows 11 上的后台资源监控小工具。C++ 写后端采集与存储，We
 
 ### 6.1 进程采集（2s 一轮）
 
-1. `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 枚举全部 PID
+1. `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 枚举全部 PID（顺带取 `th32ParentProcessID`，供进程树用）
 2. 对每个 PID：`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 拿句柄
 3. `GetProcessTimes` → 内核态 + 用户态累计时间 → 与上一轮差分 → CPU 占用
 4. `GetProcessMemoryInfo` → 工作集
@@ -350,7 +350,8 @@ s/
 | M5 规则库 | 已完成 | `src/analyze/`（usage_types / builtin_rules / rule_db）+ `store/db` 用途读写 + `/api/usage` 与 `/api/analyze` + `frontend/src/components/UsageCell.vue` |
 | ~~M6~~ | 已取消 | 原计划的联网识别功能，经用户决定不做；项目定位为纯本地工具 |
 | M7 · 趋势图/历史页 | 已完成 | `store/db` 三个区间查询 + `/api/stats` + `frontend/src/views/HistoryView.vue` + `frontend/src/components/LineChart.vue` |
-| M7 · 进程树 / 启动项 | 未开始 | — |
+| M7 · 进程树 | 已完成 | `collect/process_metrics` 增 ppid + `api/serialize` 输出 ppid + `frontend/src/views/ProcessesView.vue`（表格 ⇄ 进程树切换） |
+| M7 · 启动项 | 未开始 | — |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -493,7 +494,7 @@ M5 验收证据（2026-10-13 实测）：
 
 **M5 已提交**：`3853f2a`（18 文件 / 1645 插入）。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）→ `d72b09c`（M4）→ `a4ddf3c`（忽略 build-debug/）→ `3853f2a`（M5）。
 
-## M7 历史页与趋势图（已完成，进程树 / 启动项待续）
+## M7 历史页与趋势图（已完成）
 
 新增 3 个文件 + 改 7 个：
 
@@ -533,4 +534,40 @@ GET /api/stats?…&entity_id=<id>                        -> 单实体序列点�
 
 1. **`/api/stats` 参数扩展**：契约原写 `?from&to`，实现补上 `bucket`（桶粒度）、`top`（汇总行上限）、`entity_id`（单实体序列），一次接口覆盖三条曲线与汇总榜
 2. **单实体曲线点数为 1 时不绘制**：区间短或实例存活不足 2 个桶时只显示「该区间无数据」，不画退化线段
+
+## M7 进程树（已完成）
+
+改 3 个文件：
+
+```text
+src/collect/process_metrics.h   ProcessSample 增 ppid 字段
+src/collect/process_collector.cpp  从 PROCESSENTRY32W.th32ParentProcessID 填 ppid
+src/api/serialize.cpp           进程 JSON 增 "ppid"
+frontend/src/views/ProcessesView.vue  表格 ⇄ 进程树切换 + 缩进/折叠
+```
+
+关键实现点：
+
+- **不加系统调用**：父进程 PID 与枚举走的是同一个 `CreateToolhelp32Snapshot`，`PROCESSENTRY32W` 本就带 `th32ParentProcessID`，等于零成本
+- **父进程不在当前集合内即为根**：进程树在**过滤后**的集合上构建（受「仅后台」与关键字过滤影响），父进程被过滤掉的节点升为根，树始终自洽、不留悬空节点
+- **折叠用「已访问但不出行」表达**：被折叠的子树仍走完遍历并标记 visited，避免被「环兜底」逻辑当成根重复挂出
+- **环与深链兜底**：父子互指（或长链）由 `visited` 集合 + 深度上限 64 兜住，不会递归爆栈；成环导致没有根可达的节点，逐个补挂成根
+- **缩进上限 12 层**：每层 16px，超过 12 层不再加深，避免窄屏下名称被挤出可视区
+- **折叠三角用 CSS 画**：不用 `▾/▸` 字符，规避字体缺失时回退成豆腐块
+
+M7 进程树验收证据（2026-10-13 实测）：
+
+```text
+Debug / Release 均编译通过、零警告
+浏览器 /processes（vite 5173 + chromium，0 控制台错误）：
+  表格 134 行 ⇄ 进程树 134 行（同一帧一致；来回切 4 次读数全为 134/134）
+  树里 134 行 = 134 个不同 PID（无重复，未因构树丢行）
+  有子节点（带三角）39 行；缩进行 78，最大缩进 92px（5 层）
+  折叠一行 134 -> 114；「全部折叠」-> 56 根；「全部展开」-> 134（精确还原）
+同源交叉验证（build/tree_check.py 直取 /api/processes 在 Python 里复现构树）：
+  快照 244 条 -> 过滤后 121 条 -> 树可达 121 条（未丢行）；根 56、有子节点 33、最大层级 8
+```
+
+**进程树已提交**：见下一次提交。
+
 
