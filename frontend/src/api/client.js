@@ -29,6 +29,19 @@ export async function apiGet(path) {
   return res.json()
 }
 
+// POST /api/*，带 X-Token 与 JSON body
+export async function apiPost(path, payload) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-Token': getToken(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+  })
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`)
+  }
+  return res.json()
+}
+
 // 订阅 SSE；EventSource 无法自定义 header，token 走 query
 export function openRealtime({ onFrame, onOpen, onError }) {
   const token = getToken()
@@ -50,4 +63,20 @@ export function openRealtime({ onFrame, onOpen, onError }) {
 // GET /api/services：服务列表（含 D18 三态占用）
 export async function getServices() {
   return apiGet('/api/services')
+}
+
+// POST /api/usage：写入人工覆盖（source = manual），下一帧快照即生效
+// entry: { kind, name, path, category, purpose, suggestion }
+export async function setUsage(entry) {
+  return apiPost('/api/usage', entry)
+}
+
+// GET /api/usage：列出全部覆盖条目（manual / llm）
+export async function getUsageOverrides() {
+  return apiGet('/api/usage')
+}
+
+// POST /api/analyze：对当前快照做一次本地识别，返回命中统计与未命中清单
+export async function analyzeUsage() {
+  return apiPost('/api/analyze', {})
 }

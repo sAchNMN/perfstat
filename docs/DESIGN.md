@@ -255,8 +255,9 @@ CREATE TABLE dim_service_host (
 | GET | `/api/services/{name}` | 单服务详情 + 宿主展开 |
 | GET | `/api/stats?from&to` | 时间段聚合查询 |
 | GET | `/api/startup` | 启动项（Run 项 + 启动文件夹） |
-| POST | `/api/analyze` | 批量识别（走价格闸门 + 熔断器） |
-| POST | `/api/usage/{id}` | 人工覆盖标签（source = manual） |
+| POST | `/api/analyze` | 批量识别（M5 只跑本地库；M6 接上 LLM 与价格闸门） |
+| GET | `/api/usage` | 列出全部用途覆盖条目（manual / llm） |
+| POST | `/api/usage` | 人工覆盖标签（source = manual），实体以 body 里的 kind/name/path 定位 |
 | POST | `/api/actions/terminate` | 结束进程（内部 spawn 提权 helper） |
 | POST | `/api/actions/service` | 停 / 启服务（同上） |
 | GET | `/api/llm/status` | 熔断状态 + 今日用量 + 当前是否高峰 |
@@ -426,8 +427,9 @@ s/
 | M1 采集骨架 | 已完成 | `src/collect/`、`src/app/collect_command` |
 | M2 存储层 | 已完成 | `src/store/`、`src/app/record_command`、`src/app/db_command` |
 | M3 HTTP/SSE/页面 | 已完成 | `src/api/`、`src/app/serve_command`、`frontend/src/views/ProcessesView.vue` |
-| M4 及以后 | 未开始 | — |
 | M4 服务线 | 已完成 | `src/collect/service_collector` + `src/api/service_store` + `serialize` + `server` 路由 + `serve_command` 接线 + `frontend/src/views/ServicesView.vue` |
+| M5 规则库 | 已完成 | `src/analyze/`（usage_types / builtin_rules / rule_db）+ `store/db` 用途读写 + `/api/usage` 与 `/api/analyze` + `frontend/src/components/UsageCell.vue` |
+| M6 及以后 | 未开始 | — |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -514,4 +516,57 @@ M4 验收证据（2026-10-13 实测，非提权会话 `serve --no-persist --no-t
 2. **前端轮询而非 SSE**：服务变化频率远低于进程，2s 轮询 `/api/services` 足够，省去 SSE 帧开销；与 DESIGN 第 5 节「SSE 用于实时推送」不冲突（进程仍走 SSE）
 3. **仅枚举 Win32 服务**：`SERVICE_WIN32` 覆盖 svchost 宿主与独立进程服务；驱动（kernel/file-system driver）未纳入，与任务管理器「服务」视图一致；如需驱动可后续加 `SERVICE_DRIVER`
 
-**M4 尚未提交**（待用户确认后统一提交）。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）。
+**M4 已提交**：`d72b09c`（连同此前漏提交的 `CMakePresets.json`），其后 `a4ddf3c` 将 `build-debug/` 加入 `.gitignore`。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）→ `d72b09c`（M4）→ `a4ddf3c`。
+
+## M5 规则库（已完成）
+
+新增 5 个文件 + 改 9 个：
+
+```text
+src/analyze/usage_types.h             UsageEntry / EntityRef / AnalyzeResult + usage_key
+src/analyze/builtin_rules.h/.cpp      内置规则表（进程 89 条 + 服务 61 条）
+src/analyze/rule_db.h/.cpp            规则库：三级解析 + 人工覆盖 + 批量统计
+src/store/store_types.h               新增 UsageRow + aggregate_instance_key
+src/store/db.h/.cpp                   upsert_usage（带 manual 保护）+ load_usages
+src/api/serialize.h/.cpp              进程/服务 JSON 附带 uk 与 usage
+src/api/server.h/.cpp                 GET/POST /api/usage、POST /api/analyze
+src/app/serve_command.cpp             接线规则库（挂库或纯内存）
+frontend/src/api/client.js            apiPost + setUsage / getUsageOverrides / analyzeUsage
+frontend/src/components/UsageCell.vue 用途单元格 + 编辑弹层
+frontend/src/views/{Processes,Services}View.vue  用途列 + 「本地识别」按钮
+```
+
+关键实现点：
+
+- **实体键取聚合口径**：用途挂在「进程名 + 路径」「服务名」这一层（D12 的聚合视图键），不随实例启动时间漂移。dim_entity 里聚合实体的 instance_key = `name|path`，与采集落库的 `name|path|start_100ns` 段数不同，不会撞键
+- **manual 保护落在 SQL 里**：`ON CONFLICT(entity_id) DO UPDATE ... WHERE dim_usage.source <> 'manual' OR excluded.source = 'manual'`，M6 的 LLM 回写天然无法污染人工覆盖（D13）
+- **锁的边界**：resolve 被采集线程（序列化）与 HTTP 线程（覆盖写）同时调用，故 RuleDb 内部持 mutex；写路径把 DB IO 放在锁外，避免阻塞每 2s 一轮的序列化
+- **用途随帧附带**：序列化时就地解析并写进 JSON，前端零额外请求；覆盖保存后下一帧即生效，无需重启
+- **serve 的两种存储态**：persist 时规则库挂一个独立 SQLite 连接（WAL 支持多连接，与写库线程互不阻塞）；`--no-persist` 时为纯内存，覆盖仅本会话生效
+
+M5 验收证据（2026-10-13 实测）：
+
+```text
+内置命中（serve --no-persist --no-token）：
+  进程约 258 条 → builtin 命中 177，未识别 82（未识别全是黑名单内的系统进程）
+  服务 291 条   → builtin 命中 60
+  命中样例：svchost.exe→系统服务 / dwm.exe→桌面外壳 / nvcontainer.exe→驱动与固件
+人工覆盖：
+  未识别项 GameInputRedistService.exe 覆盖后 source=manual，known 由 false 转 true
+  覆盖 builtin 项 sihost.exe（桌面外壳）后 source 由 builtin 转 manual —— 优先级生效
+持久化（serve --db=build/m5-test.db）：
+  写入覆盖 → taskkill → 重启 → 启动日志「已有覆盖 1 条」→ GET /api/usage 精确匹配 1 条
+  → 该进程 usage.source=manual，path 逐字符一致
+批量识别 POST /api/analyze：total=549（258 进程 + 291 服务），
+  builtin=237 / manual=2 / llm=0 / unknown=310（unknown 收进 pending，留给 M6）
+浏览器（vite 5173 + chromium 截图，0 控制台错误）：
+  /processes 用途列 152 行，「浏览器 / Microsoft Edge 主进程」等正常呈现
+  /services 用途列 291 行；点单元格弹编辑框（类别 / 用途 / 建议 + 来源提示）
+```
+
+与设计的偏差（有意为之）：
+
+1. **`POST /api/usage/{id}` 改为 `POST /api/usage`**：实体定位放进 body 的 kind/name/path。进程路径含反斜杠与冒号，塞进 URL 既长又易被中间层改写；改后语义更完整（定位 + 内容一次给全）。另补 `GET /api/usage` 用于列出覆盖
+2. **builtin 规则不落 dim_usage**：内置规则随 exe 发版更新，落库反而会与新版规则打架。dim_usage 只存 manual / llm 这两层「与用户相关」的记录
+3. **用途解析放在序列化阶段**：每轮约 300 次内存查表，成本可忽略，换来前端零额外请求与「保存即生效」
+4. **`/api/analyze` 尚未接 LLM**：M5 版只跑本地库并把未命中清单回给前端；第 6.5 节的第 2 / 3 级（价格闸门 + 熔断 + DeepSeek 调用）属 M6

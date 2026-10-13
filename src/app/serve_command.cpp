@@ -22,6 +22,7 @@
 #include <random>
 #include <string>
 
+#include "analyze/rule_db.h"
 #include "api/serialize.h"
 #include "api/server.h"
 #include "api/service_store.h"
@@ -31,6 +32,7 @@
 #include "collect/sampler.h"
 #include "collect/service_collector.h"
 #include "store/aggregator.h"
+#include "store/db.h"
 #include "store/persist_worker.h"
 
 namespace perfstat::app {
@@ -156,10 +158,31 @@ int run_serve_command(const std::vector<std::string>& args) {
     api::ServiceStore   service_store;
     api::SseHub        sse_hub;
 
+    /*
+     * ========================================================================
+     * 步骤2.1：本地规则库（M5）
+     * ========================================================================
+     * 说明：
+     *   1) persist 开启时挂一个独立数据库连接 —— WAL 支持多连接并发，
+     *      规则库写 manual 与写库线程写事实行互不阻塞
+     *   2) --no-persist 时为纯内存模式，人工覆盖仅本会话生效
+     */
+    store::Database  rules_db;
+    analyze::RuleDb  rules;
+    if (persist && !rules_db.open(target_db, &err)) {
+        std::fprintf(stderr, "[PerfStat] 规则库数据库打开失败：%s\n", err.c_str());
+        return EXIT_FAILURE;
+    }
+    if (!rules.attach(persist ? &rules_db : nullptr, &err)) {
+        std::fprintf(stderr, "[PerfStat] 规则库载入失败：%s\n", err.c_str());
+        return EXIT_FAILURE;
+    }
+
     api::ServerOptions server_options;
     server_options.port = port;
     server_options.token = token;
-    api::HttpServer http(std::move(server_options), &snapshot_store, &service_store, &sse_hub);
+    api::HttpServer http(std::move(server_options), &snapshot_store, &service_store, &sse_hub,
+                         &rules);
 
     if (!http.bind(&err)) {
         std::fprintf(stderr, "[PerfStat] %s\n", err.c_str());
@@ -192,6 +215,8 @@ int run_serve_command(const std::vector<std::string>& args) {
     std::printf("  访问地址：%s\n", url.c_str());
     std::printf("  采样间隔：%ums | 落库：%s | 鉴权：%s\n", interval_ms,
                 persist ? target_db.c_str() : "关闭", token.empty() ? "关闭" : "开启");
+    std::printf("  用途库：已有覆盖 %d 条 | 存储：%s\n",
+                static_cast<int>(rules.override_count()), persist ? "已挂库" : "内存");
     std::printf("Ctrl+C 退出\n\n");
     std::fflush(stdout);  // 输出被重定向到文件时是块缓冲，不刷就拿不到 token
 
@@ -225,7 +250,7 @@ int run_serve_command(const std::vector<std::string>& args) {
 
         // 5.1 有订阅者才广播
         if (sse_hub.subscriber_count() > 0) {
-            sse_hub.broadcast(api::serialize_processes(snapshot));
+            sse_hub.broadcast(api::serialize_processes(snapshot, &rules));
         }
 
         // 5.2 刷新进程快照

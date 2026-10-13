@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { openRealtime } from '@/api/client'
+import { openRealtime, analyzeUsage } from '@/api/client'
+import UsageCell from '@/components/UsageCell.vue'
 
 // 后端每轮推一帧全量快照，前端整表替换
 const processes = ref([])
@@ -70,6 +71,22 @@ function formatKb(kb) {
   if (kb >= 1024) return (kb / 1024).toFixed(1) + ' MB'
   return kb + ' KB'
 }
+
+// 本地批量识别：M5 只跑内置规则 + 人工覆盖，未命中的留给 M6 的 LLM 层
+const analyzing = ref(false)
+const analyzeText = ref('')
+
+async function runAnalyze() {
+  analyzing.value = true
+  try {
+    const r = await analyzeUsage()
+    analyzeText.value = `命中 内置 ${r.builtin} / 人工 ${r.manual} / LLM ${r.llm}，未识别 ${r.unknown}（共 ${r.total}）`
+  } catch (e) {
+    analyzeText.value = '识别失败：' + String(e)
+  } finally {
+    analyzing.value = false
+  }
+}
 </script>
 
 <template>
@@ -86,6 +103,10 @@ function formatKb(kb) {
         仅后台
       </label>
       <input v-model="keyword" class="search" placeholder="过滤进程名" />
+      <button type="button" class="act" :disabled="analyzing" @click="runAnalyze">
+        {{ analyzing ? '识别中…' : '本地识别' }}
+      </button>
+      <span v-if="analyzeText" class="hint">{{ analyzeText }}</span>
       <span class="spacer"></span>
       <span class="hint">每 2s 刷新</span>
     </div>
@@ -96,6 +117,7 @@ function formatKb(kb) {
           <tr>
             <th class="clickable" @click="setSort('pid')">PID{{ arrow('pid') }}</th>
             <th class="clickable" @click="setSort('name')">名称{{ arrow('name') }}</th>
+            <th class="usage-col">用途</th>
             <th class="num clickable" @click="setSort('cpu')">CPU %{{ arrow('cpu') }}</th>
             <th class="num clickable" @click="setSort('mem_kb')">内存{{ arrow('mem_kb') }}</th>
             <th class="num clickable" @click="setSort('io_r_kb')">读 KB/s{{ arrow('io_r_kb') }}</th>
@@ -107,6 +129,9 @@ function formatKb(kb) {
           <tr v-for="p in rows" :key="p.pid + '-' + p.name">
             <td class="dim">{{ p.pid }}</td>
             <td :title="p.path">{{ p.name }}</td>
+            <td class="usage-col">
+              <UsageCell kind="process" :name="p.name" :path="p.path" :usage="p.usage" />
+            </td>
             <td class="num" :class="{ hot: p.cpu >= 5 }">{{ p.cpu.toFixed(2) }}</td>
             <td class="num">{{ formatKb(p.mem_kb) }}</td>
             <td class="num dim">{{ p.io_r_kb }}</td>
@@ -117,7 +142,7 @@ function formatKb(kb) {
             </td>
           </tr>
           <tr v-if="rows.length === 0">
-            <td colspan="7" class="empty">暂无数据，等待后端推送…</td>
+            <td colspan="8" class="empty">暂无数据，等待后端推送…</td>
           </tr>
         </tbody>
       </table>
@@ -168,6 +193,32 @@ function formatKb(kb) {
 
 .hint {
   color: #5c6572;
+}
+
+.act {
+  background: #232833;
+  border: 1px solid #2d3542;
+  border-radius: 4px;
+  color: #b7bec9;
+  padding: 3px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.act:hover {
+  border-color: #4ea1ff;
+  color: #d7dae0;
+}
+
+.act:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.usage-col {
+  min-width: 240px;
+  max-width: 380px;
 }
 
 .chk {

@@ -47,6 +47,24 @@ public:
     // 删除 bucket_ts < before_ts 的行，返回删除行数
     std::int64_t purge_metrics_before(std::int64_t before_ts);
 
+    /*
+     * ====================================================================
+     * 步骤：用途库写入
+     * ====================================================================
+     * 目标：dim_usage 单行 upsert
+     * 保护：目标行已是 source='manual' 时，仅允许同为 manual 的写入覆盖它
+     *       —— D13 要求 llm 自动回写不得污染人工覆盖
+     */
+    bool upsert_usage(const UsageRow& usage, std::string* err);
+
+    /*
+     * ====================================================================
+     * 步骤：用途库全量读取
+     * ====================================================================
+     * 目标：联 dim_entity 读出全部用途行，供规则库载入内存
+     */
+    bool load_usages(std::vector<UsageRow>* out, std::string* err);
+
     // 概况统计，用于验收与前端展示
     struct Stats {
         std::int64_t entity_count{0};

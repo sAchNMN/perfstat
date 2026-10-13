@@ -10,9 +10,15 @@
 
 #include <json.hpp>
 
+#include <algorithm>
 #include <cstdio>
+#include <exception>
+#include <string>
 #include <utility>
+#include <vector>
 
+#include "analyze/rule_db.h"
+#include "analyze/usage_types.h"
 #include "api/serialize.h"
 #include "api/service_store.h"
 #include "api/snapshot_store.h"
@@ -24,11 +30,15 @@ namespace {
 // SSE 心跳间隔；超过此时长无帧则发注释行，防中间层掐断空闲连接
 constexpr int kSseIdleTimeoutMs = 15000;
 
+// /api/analyze 返回的未命中清单上限（完整清单由 M6 的 LLM 层消费）
+constexpr std::size_t kPendingPreviewLimit = 50;
+
 }  // namespace
 
 HttpServer::HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-                         SseHub* hub)
-    : options_(std::move(options)), store_(store), service_store_(service_store), hub_(hub) {
+                       SseHub* hub, analyze::RuleDb* rules)
+    : options_(std::move(options)), store_(store), service_store_(service_store), hub_(hub),
+      rules_(rules) {
     server_ = std::make_unique<httplib::Server>();
 }
 
@@ -57,7 +67,7 @@ void HttpServer::register_routes() {
      * ========================================================================
      */
     server_->Get("/api/processes", [this](const httplib::Request&, httplib::Response& res) {
-        res.set_content(serialize_processes(store_->get()), "application/json");
+        res.set_content(serialize_processes(store_->get(), rules_), "application/json");
     });
 
     /*
@@ -66,7 +76,7 @@ void HttpServer::register_routes() {
      * ========================================================================
      */
     server_->Get("/api/services", [this](const httplib::Request&, httplib::Response& res) {
-        res.set_content(serialize_services(service_store_->get()), "application/json");
+        res.set_content(serialize_services(service_store_->get(), rules_), "application/json");
     });
 
     /*
@@ -104,6 +114,123 @@ void HttpServer::register_routes() {
     server_->Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
         (void)this;
         res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.3：用途库（M5）
+     * ========================================================================
+     * GET  -> 列出全部覆盖条目（manual / llm）
+     * POST -> 写入人工覆盖，落库并即时生效（source='manual'）
+     * 说明：实体定位用 body 里的 kind/name/path，不用路径参数 ——
+     *       进程路径含反斜杠与冒号，塞进 URL 既长又易被中间层改写
+     */
+    server_->Get("/api/usage", [this](const httplib::Request&, httplib::Response& res) {
+        if (rules_ == nullptr) {
+            res.status = 503;
+            res.set_content("{\"error\":\"usage store unavailable\"}", "application/json");
+            return;
+        }
+        nlohmann::json array = nlohmann::json::array();
+        for (const store::UsageRow& row : rules_->list_overrides()) {
+            array.push_back(nlohmann::json{
+                {"kind", row.kind},
+                {"name", row.name},
+                {"path", row.path},
+                {"category", row.category},
+                {"purpose", row.purpose},
+                {"suggestion", row.suggestion},
+                {"source", row.source},
+                {"updated_at", row.updated_at},
+            });
+        }
+        res.set_content(array.dump(), "application/json");
+    });
+
+    server_->Post("/api/usage", [this](const httplib::Request& req, httplib::Response& res) {
+        if (rules_ == nullptr) {
+            res.status = 503;
+            res.set_content("{\"error\":\"usage store unavailable\"}", "application/json");
+            return;
+        }
+
+        // 2.3.1 解析并校验入参
+        nlohmann::json body;
+        try {
+            body = nlohmann::json::parse(req.body);
+        } catch (const std::exception&) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid json\"}", "application/json");
+            return;
+        }
+        const std::string kind = body.value("kind", std::string("process"));
+        const std::string name = body.value("name", std::string());
+        const std::string path = body.value("path", std::string());
+        if (name.empty() || (kind != "process" && kind != "service")) {
+            res.status = 400;
+            res.set_content("{\"error\":\"kind must be process|service, name required\"}",
+                            "application/json");
+            return;
+        }
+
+        // 2.3.2 落库 + 刷新内存
+        std::string err;
+        if (!rules_->set_manual(kind, name, path, body.value("category", std::string()),
+                                body.value("purpose", std::string()),
+                                body.value("suggestion", std::string()), &err)) {
+            res.status = 500;
+            res.set_content(nlohmann::json{{"error", err}}.dump(), "application/json");
+            return;
+        }
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    /*
+     * ========================================================================
+     * 步骤2.4：批量识别（M5 版只跑本地库）
+     * ========================================================================
+     * 说明：对当前快照的全部进程与服务做一次本地匹配；
+     *       未命中清单回流给前端，M6 接上 LLM 后消费同一份 pending
+     */
+    server_->Post("/api/analyze", [this](const httplib::Request&, httplib::Response& res) {
+        if (rules_ == nullptr) {
+            res.status = 503;
+            res.set_content("{\"error\":\"usage store unavailable\"}", "application/json");
+            return;
+        }
+
+        // 2.4.1 汇总当前快照里的全部实体
+        std::vector<analyze::EntityRef> entities;
+        for (const ProcessSample& sample : store_->get().processes) {
+            entities.push_back(analyze::EntityRef{"process", sample.name, sample.path});
+        }
+        for (const ServiceInfo& service : service_store_->get().services) {
+            entities.push_back(analyze::EntityRef{"service", service.name, std::string()});
+        }
+
+        // 2.4.2 本地识别 + 未命中清单截断
+        const analyze::AnalyzeResult result = rules_->analyze(entities);
+
+        nlohmann::json pending = nlohmann::json::array();
+        const std::size_t limit = std::min(kPendingPreviewLimit, result.pending.size());
+        for (std::size_t i = 0; i < limit; ++i) {
+            pending.push_back(nlohmann::json{
+                {"kind", result.pending[i].kind},
+                {"name", result.pending[i].name},
+                {"path", result.pending[i].path},
+            });
+        }
+
+        res.set_content(nlohmann::json{
+                            {"total", result.total},
+                            {"builtin", result.builtin_hits},
+                            {"manual", result.manual_hits},
+                            {"llm", result.llm_hits},
+                            {"unknown", result.unknown},
+                            {"pending_total", result.pending.size()},
+                            {"pending", pending},
+                        }.dump(),
+                        "application/json");
     });
 
     /*

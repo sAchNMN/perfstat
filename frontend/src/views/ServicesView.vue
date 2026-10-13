@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { getServices } from '@/api/client'
+import { getServices, analyzeUsage } from '@/api/client'
+import UsageCell from '@/components/UsageCell.vue'
 
 // 服务列表由后端 /api/services 提供，前端每 2s 轮询一次（服务变化慢，无需 SSE）
 const services = ref([])
@@ -114,6 +115,22 @@ function startLabel(s) {
   }
   return map[s] || s
 }
+
+// 本地批量识别：M5 只跑内置规则 + 人工覆盖，未命中的留给 M6 的 LLM 层
+const analyzing = ref(false)
+const analyzeText = ref('')
+
+async function runAnalyze() {
+  analyzing.value = true
+  try {
+    const r = await analyzeUsage()
+    analyzeText.value = `命中 内置 ${r.builtin} / 人工 ${r.manual} / LLM ${r.llm}，未识别 ${r.unknown}（共 ${r.total}）`
+  } catch (e) {
+    analyzeText.value = '识别失败：' + String(e)
+  } finally {
+    analyzing.value = false
+  }
+}
 </script>
 
 <template>
@@ -134,8 +151,12 @@ function startLabel(s) {
         仅运行中
       </label>
       <input v-model="keyword" class="search" placeholder="过滤名称/显示名" />
+      <button type="button" class="act" :disabled="analyzing" @click="runAnalyze">
+        {{ analyzing ? '识别中…' : '本地识别' }}
+      </button>
       <span class="spacer"></span>
-      <span class="hint" v-if="lastError">{{ lastError }}</span>
+      <span v-if="analyzeText" class="hint">{{ analyzeText }}</span>
+      <span class="hint" v-else-if="lastError">{{ lastError }}</span>
       <span class="hint" v-else>每 2s 刷新</span>
     </div>
 
@@ -145,6 +166,7 @@ function startLabel(s) {
           <tr>
             <th class="clickable" @click="setSort('name')">服务名{{ arrow('name') }}</th>
             <th>显示名</th>
+            <th class="usage-col">用途</th>
             <th class="clickable" @click="setSort('state')">状态{{ arrow('state') }}</th>
             <th class="clickable" @click="setSort('start_type')">启动类型{{ arrow('start_type') }}</th>
             <th class="num clickable" @click="setSort('cpu')">CPU %{{ arrow('cpu') }}</th>
@@ -157,6 +179,9 @@ function startLabel(s) {
           <tr v-for="s in rows" :key="s.name">
             <td :title="s.name">{{ s.name }}</td>
             <td class="dim" :title="s.display">{{ s.display }}</td>
+            <td class="usage-col">
+              <UsageCell kind="service" :name="s.name" :path="''" :usage="s.usage" />
+            </td>
             <td>
               <span class="tag" :class="s.state === 'running' ? 'run' : 'stop'">
                 {{ stateLabel(s.state) }}
@@ -180,7 +205,7 @@ function startLabel(s) {
             <td class="num dim">{{ s.host_pid || '—' }}</td>
           </tr>
           <tr v-if="rows.length === 0">
-            <td colspan="8" class="empty">暂无数据，等待后端响应…</td>
+            <td colspan="9" class="empty">暂无数据，等待后端响应…</td>
           </tr>
         </tbody>
       </table>
@@ -248,6 +273,32 @@ function startLabel(s) {
 
 .hint {
   color: #5c6572;
+}
+
+.act {
+  background: #232833;
+  border: 1px solid #2d3542;
+  border-radius: 4px;
+  color: #b7bec9;
+  padding: 3px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.act:hover {
+  border-color: #4ea1ff;
+  color: #d7dae0;
+}
+
+.act:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.usage-col {
+  min-width: 240px;
+  max-width: 380px;
 }
 
 .chk {

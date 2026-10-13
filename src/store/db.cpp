@@ -11,6 +11,7 @@
 #include <sqlite3.h>
 
 #include <string>
+#include <utility>
 
 namespace perfstat::store {
 namespace {
@@ -32,6 +33,15 @@ bool exec_sql(sqlite3* db, const char* sql, std::string* err) {
 // 绑定文本；SQLITE_TRANSIENT 让 SQLite 自行复制，调用方无需维系生命周期
 void bind_text(sqlite3_stmt* stmt, int index, const std::string& value) {
     sqlite3_bind_text(stmt, index, value.c_str(), static_cast<int>(value.size()), SQLITE_TRANSIENT);
+}
+
+// 读文本列；NULL 归一为空串，避免上层判空分支
+std::string column_text(sqlite3_stmt* stmt, int index) {
+    const unsigned char* raw = sqlite3_column_text(stmt, index);
+    if (raw == nullptr) {
+        return std::string();
+    }
+    return std::string(reinterpret_cast<const char*>(raw), sqlite3_column_bytes(stmt, index));
 }
 
 }  // namespace
@@ -321,6 +331,109 @@ std::int64_t Database::purge_metrics_before(std::int64_t before_ts) {
         return 0;
     }
     return sqlite3_changes(db_);
+}
+
+bool Database::upsert_usage(const UsageRow& usage, std::string* err) {
+    if (db_ == nullptr) {
+        if (err != nullptr) *err = "数据库未打开";
+        return false;
+    }
+
+    /*
+     * ========================================================================
+     * 步骤1：单行 upsert，带 manual 保护
+     * ========================================================================
+     * ON CONFLICT 后追加 WHERE 的语义：
+     *   1) 目标不存在        -> 直接插入
+     *   2) 目标是 manual     -> 仅当写入方同为 manual 才更新（D13 保护）
+     *   3) 目标非 manual     -> 无条件更新（builtin/llm 之间可互相刷新）
+     */
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSql =
+        "INSERT INTO dim_usage"
+        "(entity_id,category,purpose,suggestion,source,confidence,updated_at)"
+        " VALUES(?1,?2,?3,?4,?5,?6,?7)"
+        " ON CONFLICT(entity_id) DO UPDATE SET"
+        " category=excluded.category, purpose=excluded.purpose,"
+        " suggestion=excluded.suggestion, source=excluded.source,"
+        " confidence=excluded.confidence, updated_at=excluded.updated_at"
+        " WHERE dim_usage.source <> 'manual' OR excluded.source = 'manual'";
+    if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, usage.entity_id);
+    bind_text(stmt, 2, usage.category);
+    bind_text(stmt, 3, usage.purpose);
+    bind_text(stmt, 4, usage.suggestion);
+    bind_text(stmt, 5, usage.source);
+    sqlite3_bind_double(stmt, 6, usage.confidence);
+    sqlite3_bind_int64(stmt, 7, usage.updated_at);
+
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    /*
+     * ========================================================================
+     * 步骤2：结果判定
+     * ========================================================================
+     * 说明：WHERE 不成立时 SQLite 视为「已处理、影响 0 行」，仍返回 DONE，
+     *       故这里只判 DONE，protected 与否由调用方的内存缓存决定
+     */
+    if (rc != SQLITE_DONE) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+    return true;
+}
+
+bool Database::load_usages(std::vector<UsageRow>* out, std::string* err) {
+    if (db_ == nullptr || out == nullptr) {
+        if (err != nullptr) *err = "数据库未打开";
+        return false;
+    }
+    out->clear();
+
+    /*
+     * ========================================================================
+     * 步骤1：联表读出全部用途行
+     * ========================================================================
+     * 说明：name/path 来自 dim_entity，用于在内存里建立「聚合键 -> 用途」索引
+     */
+    sqlite3_stmt* stmt = nullptr;
+    static const char* kSql =
+        "SELECT u.entity_id, e.kind, e.name, COALESCE(e.path,''),"
+        "       COALESCE(u.category,''), COALESCE(u.purpose,''),"
+        "       COALESCE(u.suggestion,''), u.source,"
+        "       COALESCE(u.confidence,0), u.updated_at"
+        " FROM dim_usage u JOIN dim_entity e ON e.entity_id = u.entity_id";
+    if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+        if (err != nullptr) *err = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    /*
+     * ========================================================================
+     * 步骤2：逐行装配
+     * ========================================================================
+     */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        UsageRow row;
+        row.entity_id = sqlite3_column_int64(stmt, 0);
+        row.kind = column_text(stmt, 1);
+        row.name = column_text(stmt, 2);
+        row.path = column_text(stmt, 3);
+        row.category = column_text(stmt, 4);
+        row.purpose = column_text(stmt, 5);
+        row.suggestion = column_text(stmt, 6);
+        row.source = column_text(stmt, 7);
+        row.confidence = sqlite3_column_double(stmt, 8);
+        row.updated_at = sqlite3_column_int64(stmt, 9);
+        out->push_back(std::move(row));
+    }
+    sqlite3_finalize(stmt);
+    return true;
 }
 
 bool Database::stats(Stats* out, std::string* err) {

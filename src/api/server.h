@@ -27,6 +27,14 @@ class SnapshotStore;
 class ServiceStore;
 class SseHub;
 
+}  // namespace perfstat::api
+
+namespace perfstat::analyze {
+class RuleDb;
+}
+
+namespace perfstat::api {
+
 struct ServerOptions {
     std::string host{"127.0.0.1"};
     int         port{17321};
@@ -37,7 +45,7 @@ struct ServerOptions {
 class HttpServer {
 public:
     HttpServer(ServerOptions options, SnapshotStore* store, ServiceStore* service_store,
-               SseHub* hub);
+               SseHub* hub, analyze::RuleDb* rules);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -65,6 +73,7 @@ private:
     SnapshotStore*                   store_{nullptr};
     ServiceStore*                    service_store_{nullptr};
     SseHub*                          hub_{nullptr};
+    analyze::RuleDb*                 rules_{nullptr};
     std::unique_ptr<httplib::Server> server_;
     std::thread                      thread_;
     int                              bound_port_{0};
