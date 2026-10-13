@@ -632,7 +632,7 @@ GET /api/startup：13 项，来源分布 HKCU Run 8 / HKLM Run（64 位）4 / �
   点「名称」表头切换为按名降序（Steam / StartAUEP / Snipaste / SecurityHealth）
 ```
 
-**启动项已提交**：见下一次提交。
+**启动项已提交**：`cbff9c1`（15 文件 / 1134 插入 / 13 删除）。至此 M7「趋势图/历史页 + 进程树 + 启动项」三项全部完成。当前提交历史：`086d27e`（M1）→ `c2aafac`（M2）→ `99d5d1f`（M3）→ `d72b09c`（M4）→ `a4ddf3c`（忽略 build-debug/）→ `3853f2a`（M5）→ `d4329b4`（M7 历史页 + M6 取消）→ `0075030`（M7 进程树）→ `cbff9c1`（M7 启动项）。
 
 
 
