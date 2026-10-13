@@ -67,7 +67,7 @@ target_compile_definitions(perfstat PRIVATE
 #   advapi32 -> 服务 (SCM) 与注册表
 # ---------------------------------------------------------------------------
 if(WIN32)
-    target_link_libraries(perfstat PRIVATE psapi ws2_32 advapi32)
+    target_link_libraries(perfstat PRIVATE psapi ws2_32 advapi32 shell32)
 
     # 目标平台 Windows 10+（DESIGN 定为 Windows 11）：
     # cpp-httplib 依赖 CreateFile2 等 Win8+ API，并显式拒绝低版本 SDK 目标，

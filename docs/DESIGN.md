@@ -368,7 +368,7 @@ s/
 │  ├─ store/                       # db / aggregator / persist_worker
 │  ├─ analyze/                     # rule_db / llm_client / circuit_breaker
 │  │                               # price_gate / deep_dive
-│  ├─ api/                         # server / routes_* / sse_hub
+│  ├─ api/                         # server / sse_hub / snapshot_store / serialize
 │  ├─ action/                      # privileged_helper
 │  └─ third_party/                 # httplib.h / json.hpp / sqlite3.c,h
 ├─ frontend/
@@ -424,7 +424,8 @@ s/
 |--------|------|--------|
 | M1 采集骨架 | 已完成 | `src/collect/`、`src/app/collect_command` |
 | M2 存储层 | 已完成 | `src/store/`、`src/app/record_command`、`src/app/db_command` |
-| M3 及以后 | 未开始 | — |
+| M3 HTTP/SSE/页面 | 已完成 | `src/api/`、`src/app/serve_command`、`frontend/src/views/ProcessesView.vue` |
+| M4 及以后 | 未开始 | — |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -450,3 +451,23 @@ perfstat db --purge --days=0                    -> 删除 253 行（清理路径
 1. **retention 并入 persist_worker**：清理同属写操作，必须与落库串行在同一线程，独立成模块反而割裂。第 11 节文件清单已同步。
 2. **ring_buffer 延后到 M3**：环形缓冲只服务 SSE 实时推送，落库走「分钟累加器」即可。M2 不引入。
 3. 新增 CLI 子命令 `record`（采集落库）与 `db`（概况 / 清理），作为 M2 验证入口；M8 托盘模式复用同一套 store 组件。
+
+M3 验收证据（2026-10-13 实测）：
+
+```text
+perfstat serve --no-persist   -> 监听 127.0.0.1:17321，token 为 64 位 hex
+/api/health 无 token          -> 401
+/api/health?t=<token>         -> 200
+/api/processes?t=<token>      -> JSON 数组
+/api/realtime?t=<token>       -> SSE data 帧
+vite dev 代理 /api            -> 转发 17321 成功
+浏览器 /processes             -> 轮次递增；4.5s 内由 1 行变为 158 行，无控制台错误
+```
+
+M3 实现说明：
+
+1. 新增子命令 `serve`：采样 + 落库 + HTTP/SSE 一体常驻，是 M8 托盘模式的内核。
+2. SseHub 每订阅者一条独立队列（上限 8 帧，溢出丢最老）；无订阅者时跳过 JSON 序列化。
+3. 前端 dev 期走 vite proxy（`/api` → `127.0.0.1:17321`），生产期由 exe 内嵌同源直连，前端代码用相对路径，不需区分。
+4. 前端页面当前只做 `/processes` 表格（排序 / 过滤 / 后台开关），趋势图与进程树属 M7。
+5. 「无订阅者降频到 5s」尚未实现，留待 M8 与轻量化预算一并处理。

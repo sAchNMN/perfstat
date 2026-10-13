@@ -17,4 +17,13 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  server: {
+    // 开发期把 /api 转发到本机后端；生产期前端产物由 exe 内嵌，同源直连
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:17321',
+        changeOrigin: true,
+      },
+    },
+  },
 })
