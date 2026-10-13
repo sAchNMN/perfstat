@@ -347,16 +347,16 @@ s/
 | M4 | 服务线 | 服务列表(名称/显示名/状态/启动类型) + 共享宿主标注 + 占用列三态(D17) |
 | M5 | 规则库 | builtin 命中 + 人工覆盖生效 |
 | M7 | 扩展项 | 趋势图 / 进程树 / 启动项三个页面完成 |
-| M8 | 打包 | 单文件 exe + 托盘 + 自启，内存 CPU 达标 |
+| ~~M8~~ | ~~打包~~ | 已取消：本地自用，编译后直接运行 exe 即可，不做单文件打包 / 托盘 / 自启 |
 | M9 | WebView2 壳 | 可选，不阻塞前八项 |
 
 ---
 
 ## 14. 未决项（编码中再定）
 
-1. 提权 helper 的退出码约定与错误分类
+1. 提权 helper 的退出码约定与错误分类（`src/action/` 仍为骨架，`/api/actions/*` 尚未实现）
 2. 历史汇总榜按「实例」还是按「程序（name|path）」聚合：现取实例口径（与实时页一致，但同名多实例各占一行）；若日后觉得噪音大，可改为按程序聚合，与用途键同粒度
-3. 单文件 exe 的内嵌资源体积上限（Vue 产物约 100–300KB，预计无压力）
+3. SSE 无订阅者时降频到 5s 并暂停落盘聚合（原定随 M8 一并处理，M8 取消后此项独立保留）
 
 ---
 
@@ -373,6 +373,8 @@ s/
 | M7 · 趋势图/历史页 | 已完成 | `store/db` 三个区间查询 + `/api/stats` + `frontend/src/views/HistoryView.vue` + `frontend/src/components/LineChart.vue` |
 | M7 · 进程树 | 已完成 | `collect/process_metrics` 增 ppid + `api/serialize` 输出 ppid + `frontend/src/views/ProcessesView.vue`（表格 ⇄ 进程树切换） |
 | M7 · 启动项 | 已完成 | `collect/startup_collector`（注册表 Run ×3 + 启动文件夹 ×2 + IShellLink）+ `api/startup_store` + `/api/startup` + `frontend/src/views/StartupView.vue` |
+| ~~M8~~ | 已取消 | 用户决定不做打包：工具为本地自用，编译后直接运行 `perfstat.exe` 即可；单文件 / 托盘 / 自启均不需要 |
+| M9 · WebView2 壳 | 未开始 | 可选，用独立窗口 + WebView2 承载现有前端，免去「开浏览器 + 记端口」 |
 
 第三方单文件库（`src/third_party/`）：
 
@@ -417,7 +419,7 @@ M3 实现说明：
 2. SseHub 每订阅者一条独立队列（上限 8 帧，溢出丢最老）；无订阅者时跳过 JSON 序列化。
 3. 前端 dev 期走 vite proxy（`/api` → `127.0.0.1:17321`），生产期由 exe 内嵌同源直连，前端代码用相对路径，不需区分。
 4. 前端页面当前只做 `/processes` 表格（排序 / 过滤 / 后台开关），趋势图与进程树属 M7。
-5. 「无订阅者降频到 5s」尚未实现，留待 M8 与轻量化预算一并处理。
+5. 「无订阅者降频到 5s」尚未实现，见第 14 节未决项 3（原打算随 M8 处理，M8 已取消）。
 
 ## M4 服务线（已完成）
 
